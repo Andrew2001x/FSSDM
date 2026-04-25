@@ -1,0 +1,9 @@
+﻿# Modification Note (English)
+
+Summary:
+- The change decouples protocol randomness (`prng_seed`) from `SHARK_KEYGEN_SEED`.
+- `SHARK_KEYGEN_SEED` now only affects key values.
+- Optional environment variable: `SHARK_PRNG_SEED` controls protocol randomness explicitly.
+
+Result:
+- Different `SHARK_KEYGEN_SEED` values do not change inference outputs when `SHARK_PRNG_SEED` is fixed.

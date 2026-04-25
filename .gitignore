@@ -1,0 +1,5 @@
+code/**/__pycache__/
+code/**/*.py[cod]
+code/**/logs/
+code/**/*.log
+code/**/*.bak

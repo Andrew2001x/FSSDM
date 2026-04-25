@@ -1,0 +1,2262 @@
+import math
+import json
+from pathlib import Path
+from dataclasses import dataclass
+from types import SimpleNamespace
+from typing import Any, Callable, Dict, List, Optional, Union
+
+import numpy as np
+from PIL import Image
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+# -----------------------------
+# Embedded SD2 UnCLIP small configs (from sd2-community/stable-diffusion-2-1-unclip-small)
+# -----------------------------
+UNET_CONFIG = {
+    "act_fn": "silu",
+    "attention_head_dim": [1],
+    "block_out_channels": [1],
+    "center_input_sample": False,
+    "class_embed_type": "projection",
+    "class_embeddings_concat": False,
+    "conv_in_kernel": 3,
+    "conv_out_kernel": 3,
+    "cross_attention_dim": 1,
+    "down_block_types": [
+        "DownBlock2D",
+    ],
+    "downsample_padding": 1,
+    "dual_cross_attention": False,
+    "flip_sin_to_cos": True,
+    "freq_shift": 0,
+    "in_channels": 1,
+    "layers_per_block": 0,
+    "mid_block_scale_factor": 1,
+    "mid_block_type": "UNetMidBlock2DCrossAttn",
+    "norm_eps": 1e-05,
+    "norm_num_groups": 1,
+    "num_class_embeds": None,
+    "only_cross_attention": False,
+    "out_channels": 1,
+    "projection_class_embeddings_input_dim": 2,
+    "resnet_time_scale_shift": "default",
+    "sample_size": 8,
+    "time_cond_proj_dim": None,
+    "time_embedding_type": "positional",
+    "timestep_post_act": None,
+    "up_block_types": [
+        "UpBlock2D",
+    ],
+    "upcast_attention": False,
+    "use_linear_projection": True,
+}
+
+
+VAE_CONFIG = {
+    "act_fn": "silu",
+    "block_out_channels": [1],
+    "down_block_types": [
+        "DownEncoderBlock2D",
+    ],
+    "in_channels": 3,
+    "latent_channels": 1,
+    "layers_per_block": 0,
+    "norm_num_groups": 1,
+    "out_channels": 3,
+    "sample_size": 8,
+    "scaling_factor": 0.18215,
+    "up_block_types": [
+        "UpDecoderBlock2D",
+    ],
+}
+
+
+TEXT_ENCODER_CONFIG = {
+    "attention_dropout": 0.0,
+    "bos_token_id": 0,
+    "dropout": 0.0,
+    "eos_token_id": 2,
+    "hidden_act": "gelu",
+    "hidden_size": 1,
+    "initializer_factor": 1.0,
+    "initializer_range": 0.02,
+    "intermediate_size": 1,
+    "layer_norm_eps": 1e-05,
+    "max_position_embeddings": 4,
+    "num_attention_heads": 1,
+    "num_hidden_layers": 0,
+    "pad_token_id": 1,
+    "projection_dim": 1,
+    "torch_dtype": "float16",
+    "vocab_size": 4,
+}
+
+
+IMAGE_ENCODER_CONFIG = {
+    "attention_dropout": 0.0,
+    "dropout": 0.0,
+    "hidden_act": "quick_gelu",
+    "hidden_size": 1,
+    "image_size": 1,
+    "initializer_factor": 1.0,
+    "initializer_range": 0.02,
+    "intermediate_size": 1,
+    "layer_norm_eps": 1e-05,
+    "num_attention_heads": 1,
+    "num_channels": 3,
+    "num_hidden_layers": 0,
+    "patch_size": 1,
+    "projection_dim": 1,
+    "torch_dtype": "float16",
+}
+
+
+FEATURE_EXTRACTOR_CONFIG = {
+    "crop_size": {"height": 1, "width": 1},
+    "do_center_crop": True,
+    "do_convert_rgb": True,
+    "do_normalize": True,
+    "do_rescale": True,
+    "do_resize": True,
+    "image_mean": [0.48145466, 0.4578275, 0.40821073],
+    "image_processor_type": "CLIPImageProcessor",
+    "image_std": [0.26862954, 0.26130258, 0.27577711],
+    "resample": 3,
+    "rescale_factor": 0.00392156862745098,
+    "size": {"shortest_edge": 1},
+}
+
+
+IMAGE_NOISING_SCHEDULER_CONFIG = {
+    "_class_name": "DDPMScheduler",
+    "beta_end": 0.02,
+    "beta_schedule": "squaredcos_cap_v2",
+    "beta_start": 0.0001,
+    "clip_sample": True,
+    "clip_sample_range": 1.0,
+    "dynamic_thresholding_ratio": 0.995,
+    "num_train_timesteps": 1000,
+    "prediction_type": "epsilon",
+    "sample_max_value": 1.0,
+    "thresholding": False,
+    "trained_betas": None,
+    "variance_type": "fixed_small",
+}
+
+IMAGE_NORMALIZER_CONFIG = {
+    "embedding_dim": 1,
+}
+
+
+SCHEDULER_CONFIG = {
+    "_class_name": "PNDMScheduler",
+    "beta_end": 0.012,
+    "beta_schedule": "scaled_linear",
+    "beta_start": 0.00085,
+    "num_train_timesteps": 1000,
+    "prediction_type": "epsilon",
+    "set_alpha_to_one": False,
+    "skip_prk_steps": True,
+    "steps_offset": 1,
+    "timestep_spacing": "linspace",
+    "trained_betas": None,
+}
+
+SPECIAL_TOKENS_MAP = {
+    "bos_token": {
+        "content": "<|startoftext|>",
+        "lstrip": False,
+        "normalized": True,
+        "rstrip": False,
+        "single_word": False,
+    },
+    "eos_token": {
+        "content": "<|endoftext|>",
+        "lstrip": False,
+        "normalized": True,
+        "rstrip": False,
+        "single_word": False,
+    },
+    "pad_token": "!",
+    "unk_token": {
+        "content": "<|endoftext|>",
+        "lstrip": False,
+        "normalized": True,
+        "rstrip": False,
+        "single_word": False,
+    },
+}
+
+TOKENIZER_CONFIG = {
+    "add_prefix_space": False,
+    "bos_token": {
+        "__type": "AddedToken",
+        "content": "<|startoftext|>",
+        "lstrip": False,
+        "normalized": True,
+        "rstrip": False,
+        "single_word": False,
+    },
+    "do_lower_case": True,
+    "eos_token": {
+        "__type": "AddedToken",
+        "content": "<|endoftext|>",
+        "lstrip": False,
+        "normalized": True,
+        "rstrip": False,
+        "single_word": False,
+    },
+    "errors": "replace",
+    "model_max_length": 4,
+    "pad_token": "<|endoftext|>",
+    "special_tokens_map_file": "./special_tokens_map.json",
+    "tokenizer_class": "CLIPTokenizer",
+    "unk_token": {
+        "__type": "AddedToken",
+        "content": "<|endoftext|>",
+        "lstrip": False,
+        "normalized": True,
+        "rstrip": False,
+        "single_word": False,
+    },
+}
+
+
+PROCESSOR_DIR = Path(__file__).resolve().parent / "processor"
+
+def _load_json(path: Path) -> Optional[Dict[str, Any]]:
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+def _first_json(dir_path: Path, pattern: str) -> Optional[Dict[str, Any]]:
+    try:
+        files = sorted(dir_path.glob(pattern))
+    except Exception:
+        return None
+    if not files:
+        return None
+    return _load_json(files[0])
+
+# Override configs from local processor/ if available
+if PROCESSOR_DIR.exists():
+    fe = _first_json(PROCESSOR_DIR / "feature_extractor", "preprocessor_config*.json")
+    if fe:
+        FEATURE_EXTRACTOR_CONFIG = fe
+
+    tok_cfg = _first_json(PROCESSOR_DIR / "tokenizer", "tokenizer_config*.json")
+    if tok_cfg:
+        TOKENIZER_CONFIG = tok_cfg
+
+    tok_map = _first_json(PROCESSOR_DIR / "tokenizer", "special_tokens_map*.json")
+    if tok_map:
+        SPECIAL_TOKENS_MAP = tok_map
+
+    img_norm = _first_json(PROCESSOR_DIR / "image_normalizer", "config*.json")
+    if img_norm:
+        IMAGE_NORMALIZER_CONFIG = img_norm
+
+    vae_cfg = _first_json(PROCESSOR_DIR / "vae", "config*.json")
+    if vae_cfg:
+        VAE_CONFIG = vae_cfg
+# -----------------------------
+# Minimal helpers (replace diffusers utilities)
+# -----------------------------
+USE_PEFT_BACKEND = False
+
+def deprecate(*args, **kwargs):
+    pass
+
+
+def scale_lora_layers(*args, **kwargs):
+    pass
+
+def unscale_lora_layers(*args, **kwargs):
+    pass
+
+def adjust_lora_scale_text_encoder(*args, **kwargs):
+    pass
+
+def randn_tensor(shape, generator=None, device=None, dtype=None):
+    return torch.randn(shape, generator=generator, device=device, dtype=dtype)
+
+def get_timestep_embedding(timesteps, embedding_dim, flip_sin_to_cos=True, downscale_freq_shift=0):
+    timesteps = timesteps.reshape(-1)
+    half_dim = embedding_dim // 2
+    emb = math.log(10000) / (half_dim - 1 + 1e-6)
+    emb = torch.exp(torch.arange(half_dim, device=timesteps.device, dtype=timesteps.dtype) * -emb)
+    emb = timesteps.float().unsqueeze(1) * emb.unsqueeze(0)
+    if flip_sin_to_cos:
+        emb = torch.cat([torch.cos(emb), torch.sin(emb)], dim=1)
+    else:
+        emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)
+    if embedding_dim % 2 == 1:
+        emb = F.pad(emb, (0, 1))
+    return emb
+
+
+class GaussianFourierProjection(nn.Module):
+    def __init__(self, embedding_size=256, scale=1.0):
+        super().__init__()
+        self.weight = nn.Parameter(torch.randn(embedding_size) * scale, requires_grad=False)
+
+    def forward(self, x, output_hidden_states: bool = False):
+        x = x.float().reshape(-1)
+        proj = x[:, None] * self.weight[None, :] * 2 * math.pi
+        return torch.cat([torch.sin(proj), torch.cos(proj)], dim=-1)
+
+class QuickGELU(nn.Module):
+    def forward(self, x, output_hidden_states: bool = False):
+        return x * torch.sigmoid(1.702 * x)
+
+def make_activation(name: str) -> nn.Module:
+    name = (name or "").lower()
+    if name in ("silu", "swish"):
+        return nn.SiLU()
+    if name == "quick_gelu":
+        return QuickGELU()
+    return nn.GELU()
+
+class GEGLU(nn.Module):
+    def forward(self, x, output_hidden_states: bool = False):
+        x, gate = x.chunk(2, dim=-1)
+        return x * F.gelu(gate)
+
+
+class LayerScale(nn.Module):
+    def __init__(self, dim, init_value=1.0):
+        super().__init__()
+        self.gamma = nn.Parameter(torch.ones(dim) * init_value)
+
+    def forward(self, x, output_hidden_states: bool = False):
+        return x * self.gamma
+
+class FeedForward(nn.Module):
+    def __init__(self, dim, mult=4, dropout=0.0):
+        super().__init__()
+        inner_dim = dim * mult
+        self.proj = nn.Linear(dim, inner_dim * 2)
+        self.act = GEGLU()
+        self.out = nn.Linear(inner_dim, dim)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x, output_hidden_states: bool = False):
+        x = self.proj(x)
+        x = self.act(x)
+        x = self.dropout(x)
+        return self.out(x)
+
+
+class BasicTransformerBlock(nn.Module):
+    def __init__(
+        self,
+        dim,
+        num_heads,
+        context_dim,
+        dropout=0.0,
+        use_linear_projection=True,
+        upcast_attention=False,
+        norm_eps: float = 1e-5,
+    ):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim, eps=norm_eps)
+        self.attn1 = CrossAttention(
+            dim, dim, num_heads=num_heads, use_linear_projection=use_linear_projection, upcast_attention=upcast_attention
+        )
+        self.norm2 = nn.LayerNorm(dim, eps=norm_eps)
+        self.attn2 = CrossAttention(
+            dim, context_dim, num_heads=num_heads, use_linear_projection=use_linear_projection, upcast_attention=upcast_attention
+        )
+        self.norm3 = nn.LayerNorm(dim, eps=norm_eps)
+        self.ff = FeedForward(dim, mult=4, dropout=dropout)
+
+    def forward(
+        self,
+        x,
+        context,
+        attention_mask=None,
+        encoder_attention_mask=None,
+        cross_attention_kwargs=None,
+    ):
+        scale = None
+        if cross_attention_kwargs:
+            scale = cross_attention_kwargs.get("scale", None)
+        x = x + self.attn1(self.norm1(x), context=self.norm1(x), attention_mask=attention_mask, scale=scale)
+        x = x + self.attn2(self.norm2(x), context=context, attention_mask=encoder_attention_mask, scale=scale)
+        x = x + self.ff(self.norm3(x))
+        return x
+
+
+class Transformer2DModel(nn.Module):
+    def __init__(
+        self,
+        in_channels,
+        num_attention_heads,
+        attention_head_dim,
+        cross_attention_dim,
+        num_layers=1,
+        use_linear_projection=True,
+        upcast_attention=False,
+        norm_num_groups=32,
+    ):
+        super().__init__()
+        self.norm = nn.GroupNorm(norm_num_groups, in_channels)
+        self.inner_dim = num_attention_heads * attention_head_dim
+        self.use_linear_projection = use_linear_projection
+        if use_linear_projection:
+            self.proj_in = nn.Linear(in_channels, self.inner_dim)
+            self.proj_out = nn.Linear(self.inner_dim, in_channels)
+        else:
+            self.proj_in = nn.Conv2d(in_channels, self.inner_dim, 1)
+            self.proj_out = nn.Conv2d(self.inner_dim, in_channels, 1)
+        self.transformer_blocks = nn.ModuleList([
+            BasicTransformerBlock(
+                self.inner_dim,
+                num_attention_heads,
+                cross_attention_dim,
+                dropout=0.0,
+                use_linear_projection=use_linear_projection,
+                upcast_attention=upcast_attention,
+                norm_eps=1e-5,
+            )
+            for _ in range(num_layers)
+        ])
+
+    def set_attn_processor(self, processor: "AttentionProcessor"):
+        for block in self.transformer_blocks:
+            block.attn1.set_processor(processor)
+            block.attn2.set_processor(processor)
+
+    def forward(self, hidden_states, encoder_hidden_states=None, attention_mask=None, encoder_attention_mask=None, cross_attention_kwargs=None):
+        residual = hidden_states
+        b, c, h, w = hidden_states.shape
+        x = self.norm(hidden_states)
+        if self.use_linear_projection:
+            x = x.permute(0, 2, 3, 1).reshape(b, h * w, c)
+            x = self.proj_in(x)
+        else:
+            x = self.proj_in(x)
+            x = x.permute(0, 2, 3, 1).reshape(b, h * w, self.inner_dim)
+        for block in self.transformer_blocks:
+            x = block(
+                x,
+                encoder_hidden_states,
+                attention_mask=attention_mask,
+                encoder_attention_mask=encoder_attention_mask,
+                cross_attention_kwargs=cross_attention_kwargs,
+            )
+        if self.use_linear_projection:
+            x = self.proj_out(x)
+            x = x.view(b, h, w, c).permute(0, 3, 1, 2)
+        else:
+            x = x.view(b, h, w, self.inner_dim).permute(0, 3, 1, 2)
+            x = self.proj_out(x)
+        return x + residual
+
+@dataclass
+class ImagePipelineOutput:
+    images: Union[List[Image.Image], np.ndarray, torch.Tensor]
+
+class DiffusionPipeline:
+    def __init__(self):
+        self._modules = {}
+
+    def register_modules(self, **kwargs):
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+            self._modules[k] = v
+
+    @property
+    def _execution_device(self):
+        for m in self._modules.values():
+            if hasattr(m, "parameters"):
+                try:
+                    return next(m.parameters()).device
+                except StopIteration:
+                    pass
+        return torch.device("cpu")
+
+    def to(self, device):
+        for m in self._modules.values():
+            if hasattr(m, "to"):
+                m.to(device)
+        return self
+
+    def progress_bar(self, iterable):
+        return iterable
+
+    def maybe_free_model_hooks(self):
+        pass
+
+class StableDiffusionMixin:
+    pass
+
+class TextualInversionLoaderMixin:
+    def maybe_convert_prompt(self, prompt, tokenizer):
+        return prompt
+
+class StableDiffusionLoraLoaderMixin:
+    pass
+
+# -----------------------------
+# Tokenizer (byte-level + special tokens + padding/attn mask)
+# -----------------------------
+class CLIPTokenizer:
+    def __init__(self, config: Optional[Dict[str, Any]] = None,
+                 special_tokens_map: Optional[Dict[str, Any]] = None,
+                 vocab_size: Optional[int] = None):
+        config = config or TOKENIZER_CONFIG
+        special_tokens_map = special_tokens_map or SPECIAL_TOKENS_MAP
+        vocab_size = vocab_size or TEXT_ENCODER_CONFIG["vocab_size"]
+
+        # ids from text encoder config
+        self.pad_token_id = TEXT_ENCODER_CONFIG["pad_token_id"]
+        self.bos_token_id = TEXT_ENCODER_CONFIG["bos_token_id"]
+        self.eos_token_id = TEXT_ENCODER_CONFIG["eos_token_id"]
+        self.unk_token_id = TEXT_ENCODER_CONFIG["eos_token_id"]
+        self.model_max_length = int(config.get("model_max_length", 77))
+        self.do_lower_case = bool(config.get("do_lower_case", True))
+        self.vocab_size = int(vocab_size)
+        self.token_offset = 3
+
+        # keep for reference
+        self.special_tokens_map = special_tokens_map
+        self.config = config
+
+    def encode_word(self, word):
+        # simple hash-based tokenization into vocab range (skip special ids)
+        h = abs(hash(word)) % (self.vocab_size - self.token_offset)
+        return [self.token_offset + h]
+
+    def __call__(self, texts, padding="max_length", max_length=None, truncation=True, return_tensors="pt"):
+        if isinstance(texts, str):
+            texts = [texts]
+        max_length = max_length or self.model_max_length
+
+        all_ids = []
+        for t in texts:
+            t = t.lower() if self.do_lower_case else t
+            ids = [self.bos_token_id]
+            for w in t.split():
+                ids.extend(self.encode_word(w))
+            ids.append(self.eos_token_id)
+            if truncation:
+                ids = ids[:max_length]
+            if len(ids) < max_length:
+                ids += [self.pad_token_id] * (max_length - len(ids))
+            all_ids.append(ids)
+
+        input_ids = torch.tensor(all_ids, dtype=torch.long)
+        attn = (input_ids != self.pad_token_id).long()
+        return SimpleNamespace(input_ids=input_ids, attention_mask=attn)
+
+    def batch_decode(self, ids):
+        return ["<decoded>"] * ids.shape[0]
+
+# -----------------------------
+# Text Transformer
+# -----------------------------
+class TransformerBlock(nn.Module):
+    def __init__(
+        self,
+        dim,
+        num_heads,
+        mlp_dim,
+        act_fn="gelu",
+        dropout=0.0,
+        attention_dropout=0.0,
+        layer_scale_init: Optional[float] = None,
+    ):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim)
+        self.attn = nn.MultiheadAttention(dim, num_heads, dropout=attention_dropout, batch_first=True)
+        self.norm2 = nn.LayerNorm(dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, mlp_dim),
+            make_activation(act_fn),
+            nn.Linear(mlp_dim, dim),
+        )
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+        self.ls1 = LayerScale(dim, layer_scale_init) if layer_scale_init is not None else None
+        self.ls2 = LayerScale(dim, layer_scale_init) if layer_scale_init is not None else None
+
+    def forward(self, x, key_padding_mask=None, attn_mask=None):
+        h = self.norm1(x)
+        attn_out, _ = self.attn(h, h, h, key_padding_mask=key_padding_mask, attn_mask=attn_mask)
+        if self.ls1 is not None:
+            attn_out = self.ls1(attn_out)
+        x = x + self.dropout1(attn_out)
+        mlp_out = self.mlp(self.norm2(x))
+        if self.ls2 is not None:
+            mlp_out = self.ls2(mlp_out)
+        x = x + self.dropout2(mlp_out)
+        return x
+
+class CLIPTextModel(nn.Module):
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        super().__init__()
+        config = config or TEXT_ENCODER_CONFIG
+        hidden_size = int(config["hidden_size"])
+        max_len = int(config["max_position_embeddings"])
+        num_layers = int(config["num_hidden_layers"])
+        num_heads = int(config["num_attention_heads"])
+        mlp_dim = int(config["intermediate_size"])
+        act_fn = config.get("hidden_act", "gelu")
+        dropout = float(config.get("dropout", 0.0))
+        attention_dropout = float(config.get("attention_dropout", 0.0))
+        projection_dim = int(config.get("projection_dim", hidden_size))
+        layer_scale_init = config.get("layer_scale_init", None)
+
+        self.config = SimpleNamespace(use_attention_mask=True)
+        self.eos_token_id = int(config.get("eos_token_id", 2))
+        self.pad_token_id = int(config.get("pad_token_id", 1))
+        self.emb = nn.Embedding(int(config["vocab_size"]), hidden_size)
+        self.pos = nn.Parameter(torch.zeros(1, max_len, hidden_size))
+        self.layers = nn.ModuleList([
+            TransformerBlock(
+                hidden_size,
+                num_heads,
+                mlp_dim,
+                act_fn=act_fn,
+                dropout=dropout,
+                attention_dropout=attention_dropout,
+                layer_scale_init=layer_scale_init,
+            )
+            for _ in range(num_layers)
+        ])
+        self.final_layer_norm = nn.LayerNorm(hidden_size)
+        # keep a compatible handle for callers
+        self.text_model = SimpleNamespace(final_layer_norm=self.final_layer_norm)
+        self.text_projection = nn.Linear(hidden_size, projection_dim, bias=False)
+        self.num_layers = num_layers
+
+        nn.init.normal_(self.pos, std=float(config.get("initializer_range", 0.02)))
+
+    def forward(self, input_ids, attention_mask=None, output_hidden_states=False):
+        if attention_mask is not None:
+            position_ids = (attention_mask.cumsum(dim=-1) - 1).clamp(min=0)
+        else:
+            position_ids = torch.arange(input_ids.size(1), device=input_ids.device).unsqueeze(0).expand_as(input_ids)
+        pos_emb = self.pos[:, :input_ids.size(1), :].expand(input_ids.size(0), -1, -1)
+        pos_emb = pos_emb.gather(1, position_ids.unsqueeze(-1).expand(-1, -1, pos_emb.size(-1)))
+        x = self.emb(input_ids) + pos_emb
+        seq_len = x.size(1)
+        causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool), diagonal=1)
+        key_padding_mask = _prepare_key_padding_mask(attention_mask, x.device)
+        hidden_states = []
+        if output_hidden_states:
+            hidden_states.append(x)
+        for layer in self.layers:
+            x = layer(
+                x,
+                key_padding_mask=key_padding_mask,
+                attn_mask=causal_mask,
+            )
+            if output_hidden_states:
+                hidden_states.append(x)
+        x = self.final_layer_norm(x)
+        # pool at EOS token
+        seq_len = x.shape[1]
+        idx = torch.arange(seq_len, device=x.device).unsqueeze(0)
+        eos_mask = (input_ids == self.eos_token_id)
+        if eos_mask.any(dim=1).all():
+            eos_idx = (eos_mask * idx).max(dim=1).values
+        elif attention_mask is not None:
+            eos_idx = attention_mask.long().sum(dim=1) - 1
+        else:
+            eos_idx = torch.full((x.shape[0],), seq_len - 1, device=x.device, dtype=torch.long)
+        pooled = x[torch.arange(x.shape[0], device=x.device), eos_idx]
+        text_embeds = self.text_projection(pooled)
+        if output_hidden_states:
+            return BaseModelOutputWithPooling(last_hidden_state=x, pooler_output=pooled, hidden_states=tuple(hidden_states))
+        return BaseModelOutputWithPooling(last_hidden_state=x, pooler_output=pooled, hidden_states=None)
+
+# -----------------------------
+# Vision ViT + Projection
+# -----------------------------
+class CLIPVisionModelWithProjection(nn.Module):
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        super().__init__()
+        config = config or IMAGE_ENCODER_CONFIG
+        hidden_size = int(config["hidden_size"])
+        image_size = int(config["image_size"])
+        patch_size = int(config["patch_size"])
+        num_layers = int(config["num_hidden_layers"])
+        num_heads = int(config["num_attention_heads"])
+        projection_dim = int(config["projection_dim"])
+        act_fn = config.get("hidden_act", "quick_gelu")
+        dropout = float(config.get("dropout", 0.0))
+        attention_dropout = float(config.get("attention_dropout", 0.0))
+        ln_eps = float(config.get("layer_norm_eps", 1e-5))
+        layer_scale_init = config.get("layer_scale_init", None)
+
+        self.image_size = image_size
+        self.patch_size = patch_size
+        self.patch = nn.Conv2d(3, hidden_size, kernel_size=patch_size, stride=patch_size)
+        num_patches = (image_size // patch_size) ** 2
+        self.cls = nn.Parameter(torch.zeros(1, 1, hidden_size))
+        self.pos = nn.Parameter(torch.zeros(1, num_patches + 1, hidden_size))
+        self.layers = nn.ModuleList([
+            TransformerBlock(
+                hidden_size,
+                num_heads,
+                hidden_size * 4,
+                act_fn=act_fn,
+                dropout=dropout,
+                attention_dropout=attention_dropout,
+                layer_scale_init=layer_scale_init,
+            )
+            for _ in range(num_layers)
+        ])
+        self.ln_pre = nn.LayerNorm(hidden_size, eps=ln_eps)
+        self.ln_post = nn.LayerNorm(hidden_size, eps=ln_eps)
+        self.proj = nn.Linear(hidden_size, projection_dim)
+        nn.init.normal_(self.pos, std=float(config.get("initializer_range", 0.02)))
+        nn.init.normal_(self.cls, std=float(config.get("initializer_range", 0.02)))
+
+    def _interpolate_pos_embed(self, grid_h, grid_w):
+        # Interpolate positional embeddings for different input sizes
+        if self.pos.shape[1] == grid_h * grid_w + 1:
+            return self.pos
+        cls_pos = self.pos[:, :1]
+        patch_pos = self.pos[:, 1:]
+        dim = patch_pos.shape[-1]
+        base_n = patch_pos.shape[1]
+        base_size = int(math.sqrt(base_n))
+        patch_pos = patch_pos.reshape(1, base_size, base_size, dim).permute(0, 3, 1, 2)
+        patch_pos = F.interpolate(patch_pos, size=(grid_h, grid_w), mode="bilinear", align_corners=False)
+        patch_pos = patch_pos.permute(0, 2, 3, 1).reshape(1, grid_h * grid_w, dim)
+        return torch.cat([cls_pos, patch_pos], dim=1)
+
+    def forward(self, x, output_hidden_states: bool = False):
+        B, C, H, W = x.shape
+        x = self.patch(x).flatten(2).transpose(1, 2)  # [B, N, C]
+        grid_h = H // self.patch_size
+        grid_w = W // self.patch_size
+        cls = self.cls.expand(x.size(0), -1, -1)
+        pos = self._interpolate_pos_embed(grid_h, grid_w)
+        x = torch.cat([cls, x], dim=1)
+        if pos.shape[1] == x.shape[1] - 1:
+            pos = torch.cat([self.pos[:, :1, :], pos], dim=1)
+        pos = pos[:, : x.size(1), :]
+        x = x + pos
+        x = self.ln_pre(x)
+        if output_hidden_states:
+            hidden_states = [x]
+        else:
+            hidden_states = None
+        for layer in self.layers:
+            x = layer(x, key_padding_mask=None, attn_mask=None)
+            if output_hidden_states:
+                hidden_states.append(x)
+        x = self.ln_post(x)
+        pooled = x[:, 0]  # cls token
+        image_embeds = self.proj(pooled)
+        return BaseModelOutputWithPooling(
+            last_hidden_state=x,
+            pooler_output=pooled,
+            hidden_states=tuple(hidden_states) if output_hidden_states else None,
+        )
+
+# -----------------------------
+# Image Processor (resize/normalize)
+# -----------------------------
+class CLIPImageProcessor:
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        config = config or FEATURE_EXTRACTOR_CONFIG
+        self.do_resize = bool(config.get("do_resize", True))
+        self.do_center_crop = bool(config.get("do_center_crop", True))
+        self.do_rescale = bool(config.get("do_rescale", True))
+        self.do_normalize = bool(config.get("do_normalize", True))
+        self.do_convert_rgb = bool(config.get("do_convert_rgb", True))
+        size_cfg = config.get("size", {})
+        self.size = int(size_cfg.get("shortest_edge", 224))
+        self.crop_size = config.get("crop_size", {"height": self.size, "width": self.size})
+        self.resample = int(config.get("resample", 3))
+        mean = config.get("image_mean", [0.0, 0.0, 0.0])
+        std = config.get("image_std", [1.0, 1.0, 1.0])
+        self.rescale_factor = float(config.get("rescale_factor", 1.0 / 255.0))
+        self.mean = torch.tensor(mean).view(1, 3, 1, 1)
+        self.std = torch.tensor(std).view(1, 3, 1, 1)
+
+    def _get_resample(self):
+        if self.resample == 0:
+            return Image.NEAREST
+        if self.resample == 2:
+            return Image.BILINEAR
+        if self.resample == 3:
+            return Image.BICUBIC
+        if self.resample == 4:
+            return Image.LANCZOS
+        return Image.BICUBIC
+
+    def _resize_shortest_edge(self, im):
+        w, h = im.size
+        short, long = (w, h) if w <= h else (h, w)
+        if short == self.size:
+            return im
+        scale = self.size / float(short)
+        new_w = int(round(w * scale))
+        new_h = int(round(h * scale))
+        return im.resize((new_w, new_h), self._get_resample())
+
+    def _center_crop(self, im):
+        w, h = im.size
+        th = int(self.crop_size.get("height", h))
+        tw = int(self.crop_size.get("width", w))
+        i = max(0, (h - th) // 2)
+        j = max(0, (w - tw) // 2)
+        return im.crop((j, i, j + tw, i + th))
+
+    def __call__(self, images, return_tensors="pt"):
+        if isinstance(images, Image.Image):
+            images = [images]
+        if isinstance(images, list):
+            arr = []
+            for im in images:
+                if self.do_convert_rgb:
+                    im = im.convert("RGB")
+                if self.do_resize:
+                    im = self._resize_shortest_edge(im)
+                if self.do_center_crop:
+                    im = self._center_crop(im)
+                arr.append(np.array(im))
+            arr = np.stack(arr, axis=0)
+            arr = torch.from_numpy(arr).float()
+            if self.do_rescale:
+                arr = arr * self.rescale_factor
+            arr = arr.permute(0, 3, 1, 2)
+        elif torch.is_tensor(images):
+            arr = images
+            if arr.dim() == 3:
+                arr = arr.unsqueeze(0)
+        else:
+            raise ValueError("Unsupported image type")
+
+        if self.do_normalize:
+            mean = self.mean.to(arr.device, arr.dtype)
+            std = self.std.to(arr.device, arr.dtype)
+            arr = (arr - mean) / std
+        return SimpleNamespace(pixel_values=arr)
+
+# -----------------------------
+# Image Normalizer (embedding normalization)
+# -----------------------------
+class StableUnCLIPImageNormalizer(nn.Module):
+    def __init__(self, dim: Optional[int] = None):
+        super().__init__()
+        dim = dim or int(IMAGE_NORMALIZER_CONFIG.get("embedding_dim", 768))
+        self.register_buffer("mean", torch.zeros(dim))
+        self.register_buffer("std", torch.ones(dim))
+
+    def scale(self, x):
+        return (x - self.mean) / (self.std + 1e-6)
+
+    def unscale(self, x):
+        return x * (self.std + 1e-6) + self.mean
+
+# -----------------------------
+# Karras Scheduler (sigma schedule)
+# -----------------------------
+def _betas_for_alpha_bar(num_timesteps: int, max_beta: float = 0.999):
+    def alpha_bar(t):
+        return math.cos((t + 0.008) / 1.008 * math.pi / 2) ** 2
+    betas = []
+    for i in range(num_timesteps):
+        t1 = i / num_timesteps
+        t2 = (i + 1) / num_timesteps
+        beta = min(1 - alpha_bar(t2) / alpha_bar(t1), max_beta)
+        betas.append(beta)
+    return torch.tensor(betas, dtype=torch.float32)
+
+def _threshold_sample(sample, thresholding_ratio=0.995, sample_max_value=1.0):
+    b = sample.shape[0]
+    sample_reshaped = sample.view(b, -1)
+    abs_sample = sample_reshaped.abs()
+    s = torch.quantile(abs_sample, thresholding_ratio, dim=1)
+    s = torch.clamp(s, min=1.0, max=sample_max_value)
+    s = s.view(b, *([1] * (sample.dim() - 1)))
+    sample = torch.clamp(sample, -s, s) / s
+    return sample
+
+
+def _get_variance(variance_type, betas, alpha_prod_t, alpha_prod_t_prev):
+    if variance_type in ("fixed_small", "fixed_small_log"):
+        variance = betas * (1.0 - alpha_prod_t_prev) / (1.0 - alpha_prod_t)
+    elif variance_type in ("fixed_large", "fixed_large_log"):
+        variance = betas
+    else:
+        # default fallback
+        variance = betas
+    if variance_type in ("fixed_small_log", "fixed_large_log"):
+        variance = torch.log(torch.clamp(variance, min=1e-20))
+    return variance
+
+
+class DDPMScheduler:
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        config = config or IMAGE_NOISING_SCHEDULER_CONFIG
+        self.config = SimpleNamespace(**config)
+        self.num_train_timesteps = int(config["num_train_timesteps"])
+        beta_schedule = config.get("beta_schedule", "linear")
+        if beta_schedule == "squaredcos_cap_v2":
+            self.betas = _betas_for_alpha_bar(self.num_train_timesteps)
+        else:
+            self.betas = torch.linspace(float(config["beta_start"]), float(config["beta_end"]), self.num_train_timesteps)
+        self.alphas = 1.0 - self.betas
+        self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
+        self.clip_sample = bool(config.get("clip_sample", False))
+        self.clip_sample_range = float(config.get("clip_sample_range", 1.0))
+        self.thresholding = bool(config.get("thresholding", False))
+        self.dynamic_thresholding_ratio = float(config.get("dynamic_thresholding_ratio", 0.995))
+        self.sample_max_value = float(config.get("sample_max_value", 1.0))
+        self.variance_type = config.get("variance_type", "fixed_small")
+
+    def add_noise(self, original_samples, timesteps, noise):
+        timesteps = timesteps.long().clamp(0, self.num_train_timesteps - 1)
+        alphas_cumprod = self.alphas_cumprod.to(original_samples.device)[timesteps]
+        while alphas_cumprod.dim() < original_samples.dim():
+            alphas_cumprod = alphas_cumprod.unsqueeze(-1)
+        return torch.sqrt(alphas_cumprod) * original_samples + torch.sqrt(1 - alphas_cumprod) * noise
+
+    def step(self, model_output, timestep, sample, generator=None):
+        t = timestep.long().clamp(0, self.num_train_timesteps - 1)
+        alpha_prod_t = self.alphas_cumprod.to(sample.device)[t]
+        alpha_prod_prev = self.alphas_cumprod.to(sample.device)[torch.clamp(t - 1, 0)]
+        while alpha_prod_t.dim() < sample.dim():
+            alpha_prod_t = alpha_prod_t.unsqueeze(-1)
+            alpha_prod_prev = alpha_prod_prev.unsqueeze(-1)
+
+        pred_x0 = (sample - torch.sqrt(1 - alpha_prod_t) * model_output) / torch.sqrt(alpha_prod_t)
+        if self.thresholding:
+            pred_x0 = _threshold_sample(pred_x0, self.dynamic_thresholding_ratio, self.sample_max_value)
+        elif self.clip_sample:
+            pred_x0 = pred_x0.clamp(-self.clip_sample_range, self.clip_sample_range)
+
+        variance = _get_variance(self.variance_type, self.betas.to(sample.device)[t], alpha_prod_t, alpha_prod_prev)
+        std_dev_t = torch.sqrt(torch.clamp(variance, min=1e-20))
+
+        noise = torch.randn_like(sample) if generator is None else torch.randn(
+            sample.shape, generator=generator, device=sample.device, dtype=sample.dtype
+        )
+        pred_sample = (
+            torch.sqrt(alpha_prod_prev) * pred_x0 + torch.sqrt(1 - alpha_prod_prev) * model_output
+        )
+        if t > 0:
+            pred_sample = pred_sample + std_dev_t * noise
+        return (pred_sample,)
+
+class PNDMScheduler:
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        config = config or SCHEDULER_CONFIG
+        self.config = SimpleNamespace(**config)
+        self.num_train_timesteps = int(config["num_train_timesteps"])
+        beta_schedule = config.get("beta_schedule", "linear")
+        if beta_schedule == "scaled_linear":
+            betas = torch.linspace(float(config["beta_start"]) ** 0.5, float(config["beta_end"]) ** 0.5, self.num_train_timesteps) ** 2
+        else:
+            betas = torch.linspace(float(config["beta_start"]), float(config["beta_end"]), self.num_train_timesteps)
+        self.betas = betas
+        self.alphas = 1.0 - self.betas
+        self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
+        self.init_noise_sigma = 1.0
+        self.timesteps = None
+        self.order = 1
+        self.pndm_order = 4
+        self.ets = []
+        self.counter = 0
+        self.skip_prk_steps = bool(config.get("skip_prk_steps", True))
+        self.steps_offset = int(config.get("steps_offset", 0))
+        self.timestep_spacing = str(config.get("timestep_spacing", "linspace"))
+        self.prediction_type = str(config.get("prediction_type", "epsilon"))
+        self.clip_sample = bool(config.get("clip_sample", False))
+        self.clip_sample_range = float(config.get("clip_sample_range", 1.0))
+        self.thresholding = bool(config.get("thresholding", False))
+        self.dynamic_thresholding_ratio = float(config.get("dynamic_thresholding_ratio", 0.995))
+        self.sample_max_value = float(config.get("sample_max_value", 1.0))
+        self.variance_type = config.get("variance_type", "fixed_small")
+        self.prk_timesteps = None
+        self.plms_timesteps = None
+        self.lower_order_nums = 0
+
+    def set_timesteps(self, num_inference_steps, device=None):
+        if self.timestep_spacing == "linspace":
+            timesteps = torch.linspace(self.num_train_timesteps - 1, 0, num_inference_steps, device=device)
+        else:
+            timesteps = torch.linspace(self.num_train_timesteps - 1, 0, num_inference_steps, device=device)
+        timesteps = timesteps + self.steps_offset
+        timesteps = timesteps.long()
+
+        if not self.skip_prk_steps:
+            # simple PRK warmup: repeat first timestep 4x
+            self.prk_timesteps = timesteps[:1].repeat(self.pndm_order)
+            self.plms_timesteps = timesteps[1:]
+            self.timesteps = torch.cat([self.prk_timesteps, self.plms_timesteps])
+        else:
+            self.timesteps = timesteps
+            self.prk_timesteps = None
+            self.plms_timesteps = timesteps
+        self.ets = []
+        self.counter = 0
+        self.lower_order_nums = 0
+
+    def scale_model_input(self, latents, t):
+        return latents
+
+    def _get_prev_sample(self, sample, model_output, timestep, prev_timestep):
+        t = timestep.long().clamp(0, self.num_train_timesteps - 1)
+        prev_t = prev_timestep.long().clamp(0, self.num_train_timesteps - 1)
+        alpha_prod_t = self.alphas_cumprod.to(sample.device)[t]
+        alpha_prod_prev = self.alphas_cumprod.to(sample.device)[prev_t]
+        while alpha_prod_t.dim() < sample.dim():
+            alpha_prod_t = alpha_prod_t.unsqueeze(-1)
+            alpha_prod_prev = alpha_prod_prev.unsqueeze(-1)
+
+        if self.prediction_type == "v_prediction":
+            pred_x0 = torch.sqrt(alpha_prod_t) * sample - torch.sqrt(1 - alpha_prod_t) * model_output
+        elif self.prediction_type == "sample":
+            pred_x0 = model_output
+        else:
+            pred_x0 = (sample - torch.sqrt(1 - alpha_prod_t) * model_output) / torch.sqrt(alpha_prod_t)
+
+        if self.thresholding:
+            pred_x0 = _threshold_sample(pred_x0, self.dynamic_thresholding_ratio, self.sample_max_value)
+        elif self.clip_sample:
+            pred_x0 = pred_x0.clamp(-self.clip_sample_range, self.clip_sample_range)
+
+        dir_xt = torch.sqrt(1 - alpha_prod_prev) * model_output
+        prev_sample = torch.sqrt(alpha_prod_prev) * pred_x0 + dir_xt
+        return prev_sample
+
+    def step(self, model_output, t, sample, **kwargs):
+        # PRK warmup (simplified)
+        if not self.skip_prk_steps and self.counter < self.pndm_order:
+            self.ets.append(model_output)
+            if len(self.ets) < self.pndm_order:
+                prev_sample = self._get_prev_sample(sample, model_output, t, t)
+            else:
+                rk = (self.ets[0] + 2 * self.ets[1] + 2 * self.ets[2] + self.ets[3]) / 6
+                self.ets = []
+                prev_t = t
+                prev_sample = self._get_prev_sample(sample, rk, t, prev_t)
+            self.counter += 1
+            return (prev_sample,)
+
+        # PLMS / Adams-Bashforth multistep approximation
+        self.ets.append(model_output)
+        if len(self.ets) > 4:
+            self.ets.pop(0)
+
+        if len(self.ets) == 1:
+            model_output = self.ets[-1]
+        elif len(self.ets) == 2:
+            model_output = (3 * self.ets[-1] - self.ets[-2]) / 2
+        elif len(self.ets) == 3:
+            model_output = (23 * self.ets[-1] - 16 * self.ets[-2] + 5 * self.ets[-3]) / 12
+        else:
+            model_output = (55 * self.ets[-1] - 59 * self.ets[-2] + 37 * self.ets[-3] - 9 * self.ets[-4]) / 24
+
+        prev_t = torch.clamp(t - 1, 0)
+        prev_sample = self._get_prev_sample(sample, model_output, t, prev_t)
+        self.counter += 1
+        return (prev_sample,)
+
+    def add_noise(self, original_samples, timesteps, noise):
+        timesteps = timesteps.long().clamp(0, self.num_train_timesteps - 1)
+        alphas_cumprod = self.alphas_cumprod.to(original_samples.device)[timesteps]
+        while alphas_cumprod.dim() < original_samples.dim():
+            alphas_cumprod = alphas_cumprod.unsqueeze(-1)
+        return torch.sqrt(alphas_cumprod) * original_samples + torch.sqrt(1 - alphas_cumprod) * noise
+
+
+class DDIMScheduler:
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        config = config or SCHEDULER_CONFIG
+        self.config = SimpleNamespace(**config)
+        self.num_train_timesteps = int(config["num_train_timesteps"])
+        beta_schedule = config.get("beta_schedule", "linear")
+        if beta_schedule == "scaled_linear":
+            betas = torch.linspace(float(config["beta_start"]) ** 0.5, float(config["beta_end"]) ** 0.5, self.num_train_timesteps) ** 2
+        else:
+            betas = torch.linspace(float(config["beta_start"]), float(config["beta_end"]), self.num_train_timesteps)
+        self.betas = betas
+        self.alphas = 1.0 - self.betas
+        self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
+        self.init_noise_sigma = 1.0
+        self.timesteps = None
+        self.prediction_type = str(config.get("prediction_type", "epsilon"))
+        self.clip_sample = bool(config.get("clip_sample", False))
+        self.clip_sample_range = float(config.get("clip_sample_range", 1.0))
+        self.thresholding = bool(config.get("thresholding", False))
+        self.dynamic_thresholding_ratio = float(config.get("dynamic_thresholding_ratio", 0.995))
+        self.sample_max_value = float(config.get("sample_max_value", 1.0))
+
+    def set_timesteps(self, num_inference_steps, device=None):
+        self.timesteps = torch.linspace(self.num_train_timesteps - 1, 0, num_inference_steps, device=device).long()
+
+    def scale_model_input(self, latents, t):
+        return latents
+
+    def step(self, model_output, t, sample, eta=0.0, generator=None, **kwargs):
+        t = t.long().clamp(0, self.num_train_timesteps - 1)
+        prev_t = torch.clamp(t - 1, 0)
+        alpha_prod_t = self.alphas_cumprod.to(sample.device)[t]
+        alpha_prod_prev = self.alphas_cumprod.to(sample.device)[prev_t]
+        while alpha_prod_t.dim() < sample.dim():
+            alpha_prod_t = alpha_prod_t.unsqueeze(-1)
+            alpha_prod_prev = alpha_prod_prev.unsqueeze(-1)
+
+        if self.prediction_type == "v_prediction":
+            pred_x0 = torch.sqrt(alpha_prod_t) * sample - torch.sqrt(1 - alpha_prod_t) * model_output
+        elif self.prediction_type == "sample":
+            pred_x0 = model_output
+        else:
+            pred_x0 = (sample - torch.sqrt(1 - alpha_prod_t) * model_output) / torch.sqrt(alpha_prod_t)
+
+        if self.thresholding:
+            pred_x0 = _threshold_sample(pred_x0, self.dynamic_thresholding_ratio, self.sample_max_value)
+        elif self.clip_sample:
+            pred_x0 = pred_x0.clamp(-self.clip_sample_range, self.clip_sample_range)
+
+        sigma = eta * torch.sqrt((1 - alpha_prod_prev) / (1 - alpha_prod_t)) * torch.sqrt(
+            1 - alpha_prod_t / alpha_prod_prev
+        )
+        noise = torch.randn_like(sample) if generator is None else torch.randn(
+            sample.shape, generator=generator, device=sample.device, dtype=sample.dtype
+        )
+        pred_sample_dir = torch.sqrt(1 - alpha_prod_prev - sigma ** 2) * model_output
+        prev_sample = torch.sqrt(alpha_prod_prev) * pred_x0 + pred_sample_dir + sigma * noise
+        return (prev_sample,)
+
+    def add_noise(self, original_samples, timesteps, noise):
+        timesteps = timesteps.long().clamp(0, self.num_train_timesteps - 1)
+        alphas_cumprod = self.alphas_cumprod.to(original_samples.device)[timesteps]
+        while alphas_cumprod.dim() < original_samples.dim():
+            alphas_cumprod = alphas_cumprod.unsqueeze(-1)
+        return torch.sqrt(alphas_cumprod) * original_samples + torch.sqrt(1 - alphas_cumprod) * noise
+
+
+def _karras_sigmas(num_inference_steps, sigma_min=0.01, sigma_max=1.0, rho=7.0, device=None):
+    ramp = torch.linspace(0, 1, num_inference_steps, device=device)
+    min_inv = sigma_min ** (1 / rho)
+    max_inv = sigma_max ** (1 / rho)
+    sigmas = (max_inv + ramp * (min_inv - max_inv)) ** rho
+    return sigmas
+
+
+class EulerDiscreteScheduler:
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        config = config or SCHEDULER_CONFIG
+        self.config = SimpleNamespace(**config)
+        self.num_train_timesteps = int(config["num_train_timesteps"])
+        self.sigma_min = float(config.get("sigma_min", 0.01))
+        self.sigma_max = float(config.get("sigma_max", 1.0))
+        self.rho = float(config.get("rho", 7.0))
+        self.use_karras_sigmas = bool(config.get("use_karras_sigmas", True))
+        self.timesteps = None
+        self.sigmas = None
+
+    def set_timesteps(self, num_inference_steps, device=None):
+        if self.use_karras_sigmas:
+            self.sigmas = _karras_sigmas(num_inference_steps, self.sigma_min, self.sigma_max, self.rho, device=device)
+        else:
+            self.sigmas = torch.linspace(self.sigma_max, self.sigma_min, num_inference_steps, device=device)
+        self.timesteps = torch.arange(num_inference_steps - 1, -1, -1, device=device)
+
+    def scale_model_input(self, latents, t):
+        if self.sigmas is None:
+            return latents
+        sigma = self.sigmas[t] if t.numel() == 1 else self.sigmas[t.long()]
+        sigma = sigma.view(-1, 1, 1, 1)
+        return latents / torch.sqrt(sigma ** 2 + 1.0)
+
+    def step(self, model_output, t, sample, **kwargs):
+        sigma = self.sigmas[t] if t.numel() == 1 else self.sigmas[t.long()]
+        sigma_next = self.sigmas[torch.clamp(t - 1, 0)]
+        sigma = sigma.view(-1, 1, 1, 1)
+        sigma_next = sigma_next.view(-1, 1, 1, 1)
+
+        pred_original_sample = sample - sigma * model_output
+        derivative = (sample - pred_original_sample) / sigma
+        dt = sigma_next - sigma
+        prev_sample = sample + derivative * dt
+        return (prev_sample,)
+# -----------------------------
+# VAE with encoder + posterior sampling
+# -----------------------------
+class DiagonalGaussianDistribution:
+    def __init__(self, mean, logvar, deterministic: bool = False, logvar_min: float = -30.0, logvar_max: float = 20.0):
+        self.mean = mean
+        self.logvar = torch.clamp(logvar, logvar_min, logvar_max)
+        self.deterministic = deterministic
+        self.std = torch.exp(0.5 * self.logvar)
+        self.var = torch.exp(self.logvar)
+
+    def sample(self, generator: Optional[torch.Generator] = None):
+        if self.deterministic:
+            return self.mean
+        if generator is None:
+            eps = torch.randn_like(self.std)
+        else:
+            eps = torch.randn(self.std.shape, generator=generator, device=self.std.device, dtype=self.std.dtype)
+        return self.mean + self.std * eps
+
+    def kl(self, other: Optional["DiagonalGaussianDistribution"] = None):
+        if self.deterministic:
+            return torch.zeros(self.mean.shape[0], device=self.mean.device)
+        if other is None:
+            return 0.5 * torch.sum(self.mean ** 2 + self.var - 1.0 - self.logvar, dim=[1, 2, 3])
+        return 0.5 * torch.sum(
+            ((self.mean - other.mean) ** 2) / other.var + self.var / other.var - 1.0 - self.logvar + other.logvar,
+            dim=[1, 2, 3],
+        )
+
+    def nll(self, sample):
+        if self.deterministic:
+            return torch.zeros(sample.shape[0], device=sample.device)
+        logtwopi = math.log(2.0 * math.pi)
+        return 0.5 * torch.sum(logtwopi + self.logvar + (sample - self.mean) ** 2 / self.var, dim=[1, 2, 3])
+
+    def mode(self):
+        return self.mean
+
+
+@dataclass
+class BaseModelOutputWithPooling:
+    last_hidden_state: torch.Tensor
+    pooler_output: torch.Tensor
+    hidden_states: Optional[tuple] = None
+
+    def to_tuple(self):
+        if self.hidden_states is not None:
+            return (self.last_hidden_state, self.pooler_output, self.hidden_states)
+        return (self.last_hidden_state, self.pooler_output)
+
+    def __getitem__(self, idx):
+        return self.to_tuple()[idx]
+
+    def __iter__(self):
+        return iter(self.to_tuple())
+
+class VaeResnetBlock2D(nn.Module):
+    def __init__(self, in_ch, out_ch, norm_groups=32, act_fn="silu"):
+        super().__init__()
+        self.norm1 = nn.GroupNorm(norm_groups, in_ch)
+        self.conv1 = nn.Conv2d(in_ch, out_ch, 3, padding=1)
+        self.norm2 = nn.GroupNorm(norm_groups, out_ch)
+        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=1)
+        self.act = make_activation(act_fn)
+        self.skip = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
+
+    def forward(self, x):
+        h = self.conv1(self.act(self.norm1(x)))
+        h = self.conv2(self.act(self.norm2(h)))
+        return h + self.skip(x)
+
+
+class VaeAttnBlock2D(nn.Module):
+    def __init__(self, channels, norm_groups=32):
+        super().__init__()
+        self.norm = nn.GroupNorm(norm_groups, channels)
+        self.q = nn.Conv2d(channels, channels, 1)
+        self.k = nn.Conv2d(channels, channels, 1)
+        self.v = nn.Conv2d(channels, channels, 1)
+        self.proj_out = nn.Conv2d(channels, channels, 1)
+
+    def forward(self, x):
+        b, c, h, w = x.shape
+        h_ = self.norm(x)
+        q = self.q(h_).reshape(b, c, h * w).permute(0, 2, 1)
+        k = self.k(h_).reshape(b, c, h * w)
+        v = self.v(h_).reshape(b, c, h * w)
+        attn = torch.bmm(q, k) * (c ** -0.5)
+        attn = attn.softmax(dim=-1)
+        out = torch.bmm(v, attn.permute(0, 2, 1)).reshape(b, c, h, w)
+        out = self.proj_out(out)
+        return x + out
+
+class DownEncoderBlock2D(nn.Module):
+    def __init__(self, in_ch, out_ch, layers_per_block, norm_groups, act_fn, downsample=True):
+        super().__init__()
+        self.resnets = nn.ModuleList([
+            VaeResnetBlock2D(in_ch if i == 0 else out_ch, out_ch, norm_groups=norm_groups, act_fn=act_fn)
+            for i in range(layers_per_block)
+        ])
+        self.downsample = nn.Conv2d(out_ch, out_ch, 3, stride=2, padding=1) if downsample else None
+
+    def forward(self, x):
+        for res in self.resnets:
+            x = res(x)
+        if self.downsample is not None:
+            x = self.downsample(x)
+        return x
+
+class UpDecoderBlock2D(nn.Module):
+    def __init__(self, in_ch, out_ch, layers_per_block, norm_groups, act_fn, upsample=True):
+        super().__init__()
+        self.upsample = nn.ConvTranspose2d(in_ch, out_ch, 4, stride=2, padding=1) if upsample else None
+        first_in = out_ch if upsample else in_ch
+        self.resnets = nn.ModuleList([
+            VaeResnetBlock2D(first_in if i == 0 else out_ch, out_ch, norm_groups=norm_groups, act_fn=act_fn)
+            for i in range(layers_per_block)
+        ])
+
+    def forward(self, x):
+        if self.upsample is not None:
+            x = self.upsample(x)
+        for res in self.resnets:
+            x = res(x)
+        return x
+
+class AutoencoderKL(nn.Module):
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        super().__init__()
+        config = config or VAE_CONFIG
+        self.config = SimpleNamespace(
+            block_out_channels=list(config["block_out_channels"]),
+            scaling_factor=float(config["scaling_factor"]),
+        )
+        in_channels = int(config["in_channels"])
+        latent_ch = int(config["latent_channels"])
+        blocks = list(config["block_out_channels"])
+        layers_per_block = int(config.get("layers_per_block", 2))
+        norm_groups = int(config.get("norm_num_groups", 32))
+        act_fn = config.get("act_fn", "silu")
+
+        self.conv_in = nn.Conv2d(in_channels, blocks[0], 3, padding=1)
+        self.down_blocks = nn.ModuleList()
+        ch = blocks[0]
+        for i, out_ch in enumerate(blocks):
+            downsample = i < len(blocks) - 1
+            self.down_blocks.append(
+                DownEncoderBlock2D(ch, out_ch, layers_per_block, norm_groups, act_fn, downsample=downsample)
+            )
+            ch = out_ch
+
+        self.mid_block1 = VaeResnetBlock2D(ch, ch, norm_groups=norm_groups, act_fn=act_fn)
+        self.mid_attn = VaeAttnBlock2D(ch, norm_groups=norm_groups)
+        self.mid_block2 = VaeResnetBlock2D(ch, ch, norm_groups=norm_groups, act_fn=act_fn)
+        self.norm_out = nn.GroupNorm(norm_groups, ch)
+        self.act = make_activation(act_fn)
+        self.conv_out = nn.Conv2d(ch, 2 * latent_ch, 3, padding=1)
+        self.quant_conv = nn.Conv2d(2 * latent_ch, 2 * latent_ch, 1)
+        self.post_quant_conv = nn.Conv2d(latent_ch, ch, 1)
+
+        # decoder
+        self.up_blocks = nn.ModuleList()
+        rev_blocks = list(reversed(blocks))
+        ch = rev_blocks[0]
+        # mid blocks operate at the lowest resolution (decoder start)
+        self.mid_block_dec1 = VaeResnetBlock2D(ch, ch, norm_groups=norm_groups, act_fn=act_fn)
+        self.mid_attn_dec = VaeAttnBlock2D(ch, norm_groups=norm_groups)
+        self.mid_block_dec2 = VaeResnetBlock2D(ch, ch, norm_groups=norm_groups, act_fn=act_fn)
+        for i, out_ch in enumerate(rev_blocks):
+            upsample = i < len(rev_blocks) - 1
+            self.up_blocks.append(
+                UpDecoderBlock2D(ch, out_ch, layers_per_block, norm_groups, act_fn, upsample=upsample)
+            )
+            ch = out_ch
+        self.norm_out_dec = nn.GroupNorm(norm_groups, ch)
+        self.conv_out_dec = nn.Conv2d(ch, int(config["out_channels"]), 3, padding=1)
+        self.tanh = nn.Tanh()
+
+    def encode(self, x):
+        h = self.conv_in(x)
+        for block in self.down_blocks:
+            h = block(h)
+        h = self.mid_block1(h)
+        h = self.mid_attn(h)
+        h = self.mid_block2(h)
+        h = self.conv_out(self.act(self.norm_out(h)))
+        moments = self.quant_conv(h)
+        mean, logvar = torch.chunk(moments, 2, dim=1)
+        return DiagonalGaussianDistribution(mean, logvar)
+
+    def decode(self, z, return_dict=False):
+        h = self.post_quant_conv(z)
+        h = self.mid_block_dec1(h)
+        h = self.mid_attn_dec(h)
+        h = self.mid_block_dec2(h)
+        for block in self.up_blocks:
+            h = block(h)
+        h = self.conv_out_dec(self.act(self.norm_out_dec(h)))
+        img = self.tanh(h)
+        return (img,)
+
+# -----------------------------
+# UNet with Down/Up + Cross-Attn + time embedding
+# -----------------------------
+class ResBlock(nn.Module):
+    def __init__(self, in_ch, out_ch, temb_dim, norm_groups=32, act_fn="silu", time_scale_shift="default"):
+        super().__init__()
+        self.norm1 = nn.GroupNorm(norm_groups, in_ch)
+        self.conv1 = nn.Conv2d(in_ch, out_ch, 3, padding=1)
+        self.norm2 = nn.GroupNorm(norm_groups, out_ch)
+        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=1)
+        self.skip = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
+        self.act = make_activation(act_fn)
+        self.time_scale_shift = time_scale_shift
+        self.dropout = nn.Dropout(0.0)
+        if time_scale_shift == "scale_shift":
+            self.temb = nn.Linear(temb_dim, out_ch * 2)
+        else:
+            self.temb = nn.Linear(temb_dim, out_ch)
+
+    def forward(self, x, temb):
+        h = self.conv1(self.act(self.norm1(x)))
+        temb_out = self.temb(temb)[:, :, None, None]
+        if self.time_scale_shift == "scale_shift":
+            scale, shift = temb_out.chunk(2, dim=1)
+            h = self.norm2(h)
+            h = h * (1 + scale) + shift
+            h = self.act(h)
+        else:
+            h = h + temb_out
+            h = self.act(self.norm2(h))
+        h = self.conv2(self.dropout(h))
+        return h + self.skip(x)
+
+def _prepare_attention_mask(attention_mask, target_length, dtype, device):
+    if attention_mask is None:
+        return None
+    if attention_mask.dim() == 2:
+        attention_mask = attention_mask[:, None, None, :]
+    attention_mask = attention_mask.to(device=device, dtype=dtype)
+    if attention_mask.max() <= 1.0:
+        attention_mask = (1.0 - attention_mask) * -10000.0
+    if attention_mask.shape[-1] != target_length:
+        attention_mask = attention_mask[..., :target_length]
+    return attention_mask
+
+
+def _prepare_key_padding_mask(attention_mask, device):
+    if attention_mask is None:
+        return None
+    if attention_mask.dim() != 2:
+        attention_mask = attention_mask.view(attention_mask.shape[0], -1)
+    return (attention_mask == 0).to(device=device)
+
+
+class AttentionProcessor:
+    def __call__(self, q, k, v, scale, attention_mask=None):
+        attn = (q @ k.transpose(-2, -1)) * scale
+        if attention_mask is not None:
+            attn = attn + attention_mask
+        attn = attn.softmax(dim=-1)
+        return attn @ v
+
+
+class AttnProcessor2_0(AttentionProcessor):
+    def __call__(self, q, k, v, scale, attention_mask=None):
+        if hasattr(F, "scaled_dot_product_attention"):
+            if attention_mask is not None:
+                # F.scaled_dot_product_attention expects float mask with -inf
+                attn_mask = attention_mask
+            else:
+                attn_mask = None
+            return F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=0.0, is_causal=False)
+        return super().__call__(q, k, v, scale, attention_mask=attention_mask)
+
+
+class XFormersAttnProcessor(AttentionProcessor):
+    def __call__(self, q, k, v, scale, attention_mask=None):
+        raise RuntimeError("xFormers not available in this minimal implementation.")
+
+class CrossAttention(nn.Module):
+    def __init__(
+        self,
+        dim,
+        context_dim,
+        num_heads=4,
+        processor: Optional[AttentionProcessor] = None,
+        use_linear_projection: bool = True,
+        upcast_attention: bool = False,
+    ):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.scale = self.head_dim ** -0.5
+        self.use_linear_projection = use_linear_projection
+        self.upcast_attention = upcast_attention
+        self.to_q = nn.Linear(dim, dim)
+        self.to_k = nn.Linear(context_dim, dim)
+        self.to_v = nn.Linear(context_dim, dim)
+        self.to_out = nn.Linear(dim, dim)
+        self.processor = processor or AttentionProcessor()
+
+    def set_processor(self, processor: AttentionProcessor):
+        self.processor = processor
+
+    def forward(self, x, context, attention_mask=None, scale: Optional[float] = None):
+        B, N, C = x.shape
+        q = self.to_q(x).view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
+        k = self.to_k(context).view(B, -1, self.num_heads, self.head_dim).transpose(1, 2)
+        v = self.to_v(context).view(B, -1, self.num_heads, self.head_dim).transpose(1, 2)
+        scale = self.scale if scale is None else scale
+        if attention_mask is not None:
+            attention_mask = _prepare_attention_mask(attention_mask, k.shape[-2], q.dtype, q.device)
+        if self.upcast_attention:
+            q = q.float()
+            k = k.float()
+            v = v.float()
+            if attention_mask is not None:
+                attention_mask = attention_mask.float()
+        out = self.processor(q, k, v, scale, attention_mask=attention_mask)
+        if self.upcast_attention:
+            out = out.to(x.dtype)
+        out = out.transpose(1, 2).contiguous().view(B, N, C)
+        return self.to_out(out)
+
+class CrossAttnBlock2D(nn.Module):
+    def __init__(
+        self,
+        channels,
+        context_dim,
+        num_heads,
+        use_linear_projection=True,
+        num_layers=1,
+        norm_groups=32,
+        upcast_attention=False,
+    ):
+        super().__init__()
+        self.transformer = Transformer2DModel(
+            in_channels=channels,
+            num_attention_heads=num_heads,
+            attention_head_dim=channels // max(1, num_heads),
+            cross_attention_dim=context_dim,
+            num_layers=num_layers,
+            use_linear_projection=use_linear_projection,
+            upcast_attention=upcast_attention,
+            norm_num_groups=norm_groups,
+        )
+
+    def set_processor(self, processor: AttentionProcessor):
+        self.transformer.set_attn_processor(processor)
+
+    def forward(self, x, context, attention_mask=None, encoder_attention_mask=None, cross_attention_kwargs=None):
+        return self.transformer(
+            x,
+            encoder_hidden_states=context,
+            attention_mask=attention_mask,
+            encoder_attention_mask=encoder_attention_mask,
+            cross_attention_kwargs=cross_attention_kwargs,
+        )
+
+class DownBlock2D(nn.Module):
+    def __init__(
+        self,
+        in_ch,
+        out_ch,
+        temb_dim,
+        has_cross_attn,
+        context_dim,
+        num_heads,
+        norm_groups,
+        act_fn,
+        layers_per_block,
+        downsample=True,
+        time_scale_shift="default",
+        use_linear_projection=True,
+        upcast_attention=False,
+    ):
+        super().__init__()
+        self.resblocks = nn.ModuleList([
+            ResBlock(
+                in_ch if i == 0 else out_ch,
+                out_ch,
+                temb_dim,
+                norm_groups=norm_groups,
+                act_fn=act_fn,
+                time_scale_shift=time_scale_shift,
+            )
+            for i in range(layers_per_block)
+        ])
+        self.attn = nn.ModuleList([
+            CrossAttnBlock2D(
+                out_ch,
+                context_dim,
+                num_heads,
+                use_linear_projection=use_linear_projection,
+                num_layers=1,
+                norm_groups=norm_groups,
+                upcast_attention=upcast_attention,
+            )
+            for _ in range(layers_per_block)
+        ]) if has_cross_attn else None
+        self.downsample = nn.Conv2d(out_ch, out_ch, 3, stride=2, padding=1) if downsample else None
+
+    def forward(self, x, temb, context, cross_attention_kwargs=None, encoder_attention_mask=None):
+        res_samples = []
+        for i, res in enumerate(self.resblocks):
+            x = res(x, temb)
+            if self.attn is not None:
+                x = self.attn[i](
+                    x,
+                    context,
+                    encoder_attention_mask=encoder_attention_mask,
+                    cross_attention_kwargs=cross_attention_kwargs,
+                )
+            res_samples.append(x)
+        if self.downsample is not None:
+            x = self.downsample(x)
+            res_samples.append(x)
+        return x, res_samples
+
+class UpBlock2D(nn.Module):
+    def __init__(
+        self,
+        in_ch,
+        out_ch,
+        temb_dim,
+        has_cross_attn,
+        context_dim,
+        num_heads,
+        norm_groups,
+        act_fn,
+        layers_per_block,
+        skip_channels: List[int],
+        upsample=True,
+        time_scale_shift="default",
+        use_linear_projection=True,
+        upcast_attention=False,
+    ):
+        super().__init__()
+        num_resnets = layers_per_block + (1 if upsample else 0)
+        if len(skip_channels) != num_resnets:
+            raise ValueError("skip_channels length must match number of resnets")
+        self.upsample = nn.ConvTranspose2d(out_ch, out_ch, 4, stride=2, padding=1) if upsample else None
+        self.resblocks = nn.ModuleList()
+        for i in range(num_resnets):
+            skip_ch = skip_channels[i]
+            res_in = (in_ch if i == 0 else out_ch) + skip_ch
+            self.resblocks.append(
+                ResBlock(
+                    res_in,
+                    out_ch,
+                    temb_dim,
+                    norm_groups=norm_groups,
+                    act_fn=act_fn,
+                    time_scale_shift=time_scale_shift,
+                )
+            )
+        self.attn = nn.ModuleList([
+            CrossAttnBlock2D(
+                out_ch,
+                context_dim,
+                num_heads,
+                use_linear_projection=use_linear_projection,
+                num_layers=1,
+                norm_groups=norm_groups,
+                upcast_attention=upcast_attention,
+            )
+            for _ in range(num_resnets)
+        ]) if has_cross_attn else None
+
+    def forward(self, x, skips, temb, context, cross_attention_kwargs=None, encoder_attention_mask=None):
+        for i, res in enumerate(self.resblocks):
+            if not skips:
+                raise ValueError("Not enough skip features for up block")
+            skip = skips.pop()
+            if skip.shape[2:] != x.shape[2:]:
+                # align spatial sizes if needed
+                x = F.interpolate(x, size=skip.shape[2:], mode="nearest")
+            x = torch.cat([x, skip], dim=1)
+            x = res(x, temb)
+            if self.attn is not None:
+                x = self.attn[i](
+                    x,
+                    context,
+                    encoder_attention_mask=encoder_attention_mask,
+                    cross_attention_kwargs=cross_attention_kwargs,
+                )
+        if self.upsample is not None:
+            x = self.upsample(x)
+        return x
+
+class UNet2DConditionModel(nn.Module):
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        super().__init__()
+        config = config or UNET_CONFIG
+        self.config = SimpleNamespace(in_channels=config["in_channels"], sample_size=config["sample_size"])
+        act_fn = config.get("act_fn", "silu")
+        norm_groups = int(config.get("norm_num_groups", 32))
+        layers_per_block = int(config.get("layers_per_block", 2))
+        block_out_channels = list(config["block_out_channels"])
+        cross_attention_dim = int(config["cross_attention_dim"])
+        attn_head_dim = list(config["attention_head_dim"])
+        time_scale_shift = config.get("resnet_time_scale_shift", "default")
+        use_linear_projection = bool(config.get("use_linear_projection", True))
+        upcast_attention = bool(config.get("upcast_attention", False))
+        self.flip_sin_to_cos = bool(config.get("flip_sin_to_cos", True))
+        self.freq_shift = int(config.get("freq_shift", 0))
+        self.time_embedding_type = str(config.get("time_embedding_type", "positional"))
+        self.timestep_post_act = config.get("timestep_post_act", None)
+        self.time_cond_proj_dim = config.get("time_cond_proj_dim", None)
+
+        temb_dim = block_out_channels[0] * 4
+        time_embed_dim = block_out_channels[0]
+        if self.time_embedding_type == "fourier":
+            self.time_proj = GaussianFourierProjection(embedding_size=time_embed_dim // 2, scale=1.0)
+            time_in_dim = time_embed_dim
+        else:
+            self.time_proj = None
+            time_in_dim = time_embed_dim
+        self.time_mlp = nn.Sequential(
+            nn.Linear(time_in_dim, temb_dim),
+            make_activation(act_fn),
+            nn.Linear(temb_dim, temb_dim),
+        )
+        if self.timestep_post_act is not None:
+            self.time_post_act = make_activation(self.timestep_post_act)
+        else:
+            self.time_post_act = None
+        if self.time_cond_proj_dim is not None:
+            self.time_cond_proj = nn.Linear(temb_dim, int(self.time_cond_proj_dim))
+        else:
+            self.time_cond_proj = None
+        self.img_proj = nn.Linear(int(config["projection_class_embeddings_input_dim"]), temb_dim)
+
+        self.conv_in = nn.Conv2d(config["in_channels"], block_out_channels[0], 3, padding=1)
+
+        self.down_blocks = nn.ModuleList()
+        res_channels = []
+        in_ch = block_out_channels[0]
+        for i, out_ch in enumerate(block_out_channels):
+            has_cross = "CrossAttn" in config["down_block_types"][i]
+            head_dim = attn_head_dim[min(i, len(attn_head_dim) - 1)]
+            num_heads = max(1, out_ch // head_dim)
+            downsample = i < len(block_out_channels) - 1
+            self.down_blocks.append(
+                DownBlock2D(
+                    in_ch,
+                    out_ch,
+                    temb_dim,
+                    has_cross,
+                    cross_attention_dim,
+                    num_heads,
+                    norm_groups,
+                    act_fn,
+                    layers_per_block,
+                    downsample=downsample,
+                    time_scale_shift=time_scale_shift,
+                    use_linear_projection=use_linear_projection,
+                    upcast_attention=upcast_attention,
+                )
+            )
+            res_channels.extend([out_ch] * layers_per_block)
+            if downsample:
+                res_channels.append(out_ch)
+            in_ch = out_ch
+
+        # mid block (ResBlock -> Attn -> ResBlock)
+        self.mid_block1 = ResBlock(
+            in_ch, in_ch, temb_dim, norm_groups=norm_groups, act_fn=act_fn, time_scale_shift=time_scale_shift
+        )
+        self.mid_attn = CrossAttnBlock2D(
+            in_ch,
+            cross_attention_dim,
+            num_heads=max(1, in_ch // attn_head_dim[-1]),
+            use_linear_projection=use_linear_projection,
+            num_layers=1,
+            norm_groups=norm_groups,
+            upcast_attention=upcast_attention,
+        )
+        self.mid_block2 = ResBlock(
+            in_ch, in_ch, temb_dim, norm_groups=norm_groups, act_fn=act_fn, time_scale_shift=time_scale_shift
+        )
+
+        self.up_blocks = nn.ModuleList()
+        rev_channels = list(reversed(block_out_channels))
+        for i, out_ch in enumerate(rev_channels):
+            has_cross = "CrossAttn" in config["up_block_types"][i]
+            head_dim = attn_head_dim[min(len(attn_head_dim) - 1 - i, len(attn_head_dim) - 1)]
+            num_heads = max(1, out_ch // head_dim)
+            in_ch = rev_channels[i - 1] if i > 0 else rev_channels[0]
+            upsample = i < len(rev_channels) - 1
+            num_resnets = layers_per_block + (1 if upsample else 0)
+            skip_channels = [res_channels.pop() for _ in range(num_resnets)]
+            self.up_blocks.append(
+                UpBlock2D(
+                    in_ch,
+                    out_ch,
+                    temb_dim,
+                    has_cross,
+                    cross_attention_dim,
+                    num_heads,
+                    norm_groups,
+                    act_fn,
+                    layers_per_block,
+                    skip_channels=skip_channels,
+                    upsample=upsample,
+                    time_scale_shift=time_scale_shift,
+                    use_linear_projection=use_linear_projection,
+                    upcast_attention=upcast_attention,
+                )
+            )
+
+        self.conv_out = nn.Conv2d(block_out_channels[0], config["out_channels"], 3, padding=1)
+
+    def set_attn_processor(self, processor: AttentionProcessor):
+        for block in self.down_blocks:
+            if block.attn is not None:
+                for attn in block.attn:
+                    attn.set_processor(processor)
+        if self.mid_attn is not None:
+            self.mid_attn.set_processor(processor)
+        for block in self.up_blocks:
+            if block.attn is not None:
+                for attn in block.attn:
+                    attn.set_processor(processor)
+
+    def forward(
+        self,
+        latents,
+        t,
+        encoder_hidden_states,
+        class_labels,
+        cross_attention_kwargs=None,
+        encoder_attention_mask=None,
+        return_dict=False,
+    ):
+        if self.time_embedding_type == "fourier" and self.time_proj is not None:
+            t_embed = self.time_proj(t.to(latents.device))
+        else:
+            t_embed = get_timestep_embedding(
+                t,
+                self.time_mlp[0].in_features,
+                flip_sin_to_cos=self.flip_sin_to_cos,
+                downscale_freq_shift=self.freq_shift,
+            ).to(latents.device)
+        if t_embed.shape[0] == 1 and latents.shape[0] > 1:
+            t_embed = t_embed.expand(latents.shape[0], -1)
+        temb = self.time_mlp(t_embed)
+        if self.time_post_act is not None:
+            temb = self.time_post_act(temb)
+        if self.time_cond_proj is not None:
+            _ = self.time_cond_proj(temb)
+        temb = temb + self.img_proj(class_labels)
+
+        h = self.conv_in(latents)
+        skips_all = []
+        for block in self.down_blocks:
+            h, skips = block(
+                h,
+                temb,
+                encoder_hidden_states,
+                cross_attention_kwargs=cross_attention_kwargs,
+                encoder_attention_mask=encoder_attention_mask,
+            )
+            skips_all.extend(skips)
+
+        h = self.mid_block1(h, temb)
+        h = self.mid_attn(
+            h,
+            encoder_hidden_states,
+            encoder_attention_mask=encoder_attention_mask,
+            cross_attention_kwargs=cross_attention_kwargs,
+        )
+        h = self.mid_block2(h, temb)
+
+        for block in self.up_blocks:
+            h = block(
+                h,
+                skips_all,
+                temb,
+                encoder_hidden_states,
+                cross_attention_kwargs=cross_attention_kwargs,
+                encoder_attention_mask=encoder_attention_mask,
+            )
+
+        out = self.conv_out(h)
+        return (out,)
+
+# -----------------------------
+# VAE Image Processor
+# -----------------------------
+class VaeImageProcessor:
+    def __init__(self, vae_scale_factor=8):
+        self.vae_scale_factor = vae_scale_factor
+
+    def postprocess(self, image, output_type="pil"):
+        if output_type == "latent":
+            return image
+        if torch.is_tensor(image):
+            image = image.detach().cpu()
+            imgs = image if image.dim() == 4 else image.unsqueeze(0)
+            # VAE outputs in [-1, 1]; scale to [0, 1]
+            imgs = (imgs / 2 + 0.5).clamp(0, 1)
+            if output_type == "np":
+                return imgs.permute(0, 2, 3, 1).numpy()
+            out = []
+            for img in imgs:
+                arr = (img.permute(1, 2, 0).numpy() * 255).clip(0, 255).astype(np.uint8)
+                out.append(Image.fromarray(arr))
+            return out
+        return image
+
+# -----------------------------
+# Pipeline: same structure & function calls
+# -----------------------------
+class StableUnCLIPImg2ImgPipeline(
+    DiffusionPipeline, StableDiffusionMixin, TextualInversionLoaderMixin, StableDiffusionLoraLoaderMixin
+):
+    model_cpu_offload_seq = "text_encoder->image_encoder->unet->vae"
+    _exclude_from_cpu_offload = ["image_normalizer"]
+
+    def __init__(
+        self,
+        feature_extractor: CLIPImageProcessor,
+        image_encoder: CLIPVisionModelWithProjection,
+        image_normalizer: StableUnCLIPImageNormalizer,
+        image_noising_scheduler: DDPMScheduler,
+        tokenizer: CLIPTokenizer,
+        text_encoder: CLIPTextModel,
+        unet: UNet2DConditionModel,
+        scheduler: PNDMScheduler,
+        vae: AutoencoderKL,
+    ):
+        super().__init__()
+        self.register_modules(
+            feature_extractor=feature_extractor,
+            image_encoder=image_encoder,
+            image_normalizer=image_normalizer,
+            image_noising_scheduler=image_noising_scheduler,
+            tokenizer=tokenizer,
+            text_encoder=text_encoder,
+            unet=unet,
+            scheduler=scheduler,
+            vae=vae,
+        )
+        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
+        self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor)
+
+    def _encode_prompt(self, prompt, device, num_images_per_prompt, do_classifier_free_guidance,
+                       negative_prompt=None, prompt_embeds=None, negative_prompt_embeds=None, lora_scale=None, **kwargs):
+        deprecate("_encode_prompt()", "1.0.0", "Use encode_prompt() instead.", standard_warn=False)
+        prompt_embeds_tuple = self.encode_prompt(
+            prompt, device, num_images_per_prompt, do_classifier_free_guidance,
+            negative_prompt, prompt_embeds, negative_prompt_embeds, lora_scale, **kwargs
+        )
+        prompt_embeds = torch.cat([prompt_embeds_tuple[1], prompt_embeds_tuple[0]])
+        return prompt_embeds
+
+    def encode_prompt(self, prompt, device, num_images_per_prompt, do_classifier_free_guidance,
+                      negative_prompt=None, prompt_embeds=None, negative_prompt_embeds=None,
+                      lora_scale=None, clip_skip: Optional[int] = None):
+        if lora_scale is not None and isinstance(self, StableDiffusionLoraLoaderMixin):
+            self._lora_scale = lora_scale
+            if not USE_PEFT_BACKEND:
+                adjust_lora_scale_text_encoder(self.text_encoder, lora_scale)
+            else:
+                scale_lora_layers(self.text_encoder, lora_scale)
+
+        if prompt is not None and isinstance(prompt, str):
+            batch_size = 1
+        elif prompt is not None and isinstance(prompt, list):
+            batch_size = len(prompt)
+        else:
+            batch_size = prompt_embeds.shape[0]
+
+        prompt_attention_mask = None
+        negative_prompt_attention_mask = None
+        if prompt_embeds is None:
+            if isinstance(self, TextualInversionLoaderMixin):
+                prompt = self.maybe_convert_prompt(prompt, self.tokenizer)
+            text_inputs = self.tokenizer(
+                prompt, padding="max_length",
+                max_length=self.tokenizer.model_max_length,
+                truncation=True, return_tensors="pt",
+            )
+            text_input_ids = text_inputs.input_ids
+            attention_mask = text_inputs.attention_mask.to(device)
+            prompt_attention_mask = attention_mask
+
+            if clip_skip is None:
+                prompt_embeds = self.text_encoder(text_input_ids.to(device), attention_mask=attention_mask).last_hidden_state
+            else:
+                prompt_out = self.text_encoder(
+                    text_input_ids.to(device), attention_mask=attention_mask, output_hidden_states=True
+                )
+                prompt_embeds = prompt_out.hidden_states[-(clip_skip + 1)]
+                prompt_embeds = self.text_encoder.text_model.final_layer_norm(prompt_embeds)
+
+        prompt_embeds = prompt_embeds.to(device=device)
+        bs_embed, seq_len, _ = prompt_embeds.shape
+        prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
+        prompt_embeds = prompt_embeds.view(bs_embed * num_images_per_prompt, seq_len, -1)
+
+        if do_classifier_free_guidance and negative_prompt_embeds is None:
+            uncond_tokens = [""] * batch_size if negative_prompt is None else negative_prompt
+            uncond_input = self.tokenizer(
+                uncond_tokens, padding="max_length", max_length=seq_len,
+                truncation=True, return_tensors="pt"
+            )
+            negative_prompt_embeds = self.text_encoder(
+                uncond_input.input_ids.to(device),
+                attention_mask=uncond_input.attention_mask.to(device),
+            ).last_hidden_state
+            negative_prompt_attention_mask = uncond_input.attention_mask.to(device)
+
+        if do_classifier_free_guidance:
+            negative_prompt_embeds = negative_prompt_embeds.to(device=device)
+            negative_prompt_embeds = negative_prompt_embeds.repeat(1, num_images_per_prompt, 1)
+            negative_prompt_embeds = negative_prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
+            if negative_prompt_attention_mask is not None:
+                negative_prompt_attention_mask = negative_prompt_attention_mask.repeat(1, num_images_per_prompt)
+
+        if isinstance(self, StableDiffusionLoraLoaderMixin) and USE_PEFT_BACKEND:
+            unscale_lora_layers(self.text_encoder, lora_scale)
+
+        if prompt_attention_mask is not None:
+            prompt_attention_mask = prompt_attention_mask.repeat(1, num_images_per_prompt)
+        return prompt_embeds, negative_prompt_embeds, prompt_attention_mask, negative_prompt_attention_mask
+
+    def _encode_image(self, image, device, batch_size, num_images_per_prompt,
+                      do_classifier_free_guidance, noise_level, generator, image_embeds):
+        dtype = next(self.image_encoder.parameters()).dtype
+        repeat_by = batch_size if isinstance(image, Image.Image) else num_images_per_prompt
+
+        if image_embeds is None:
+            if not isinstance(image, torch.Tensor):
+                image = self.feature_extractor(images=image, return_tensors="pt").pixel_values
+            image = image.to(device=device, dtype=dtype)
+            out = self.image_encoder(image)
+            image_embeds = self.image_encoder.proj(out.pooler_output)
+
+        image_embeds = self.noise_image_embeddings(image_embeds, noise_level, generator=generator)
+
+        image_embeds = image_embeds.unsqueeze(1).repeat(1, repeat_by, 1)
+        image_embeds = image_embeds.view(image_embeds.size(0) * repeat_by, -1)
+
+        if do_classifier_free_guidance:
+            negative_prompt_embeds = torch.zeros_like(image_embeds)
+            image_embeds = torch.cat([negative_prompt_embeds, image_embeds])
+
+        return image_embeds
+
+    def prepare_latents(self, batch_size, num_channels_latents, height, width, dtype, device, generator, latents=None):
+        shape = (batch_size, num_channels_latents, height // self.vae_scale_factor, width // self.vae_scale_factor)
+        if latents is None:
+            latents = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
+        else:
+            latents = latents.to(device)
+        latents = latents * self.scheduler.init_noise_sigma
+        return latents
+
+    def noise_image_embeddings(self, image_embeds, noise_level, noise=None, generator=None):
+        if noise is None:
+            noise = randn_tensor(image_embeds.shape, generator=generator, device=image_embeds.device, dtype=image_embeds.dtype)
+        noise_level = torch.tensor([int(noise_level)] * image_embeds.shape[0], device=image_embeds.device)
+
+        self.image_normalizer.to(image_embeds.device)
+        image_embeds = self.image_normalizer.scale(image_embeds)
+        image_embeds = self.image_noising_scheduler.add_noise(image_embeds, timesteps=noise_level, noise=noise)
+        image_embeds = self.image_normalizer.unscale(image_embeds)
+
+        noise_level = get_timestep_embedding(
+            timesteps=noise_level, embedding_dim=image_embeds.shape[-1],
+            flip_sin_to_cos=True, downscale_freq_shift=0
+        ).to(image_embeds.dtype)
+
+        image_embeds = torch.cat((image_embeds, noise_level), dim=1)
+        return image_embeds
+
+    def prepare_extra_step_kwargs(self, generator, eta):
+        return {}
+
+    def check_inputs(self, prompt, image, height, width, callback_steps, noise_level,
+                     negative_prompt=None, prompt_embeds=None, negative_prompt_embeds=None, image_embeds=None):
+        if height % 8 != 0 or width % 8 != 0:
+            raise ValueError("height/width must be divisible by 8")
+        # Our UNet downsamples len(down_block_types)-1 times; latent H/W must be divisible by 2**downs
+        downsample_factor = 2 ** (len(UNET_CONFIG["down_block_types"]) - 1)
+        latent_h = height // self.vae_scale_factor
+        latent_w = width // self.vae_scale_factor
+        if (latent_h % downsample_factor) != 0 or (latent_w % downsample_factor) != 0:
+            raise ValueError(
+                f"height/width must be divisible by {self.vae_scale_factor * downsample_factor} "
+                f"(got {height}x{width})"
+            )
+        if callback_steps is not None and (not isinstance(callback_steps, int) or callback_steps <= 0):
+            raise ValueError("callback_steps must be positive int")
+        if prompt is not None and prompt_embeds is not None:
+            raise ValueError("Provide either prompt or prompt_embeds")
+        if prompt is None and prompt_embeds is None:
+            raise ValueError("prompt and prompt_embeds cannot both be None")
+        if image is not None and image_embeds is not None:
+            raise ValueError("Provide either image or image_embeds")
+        if image is None and image_embeds is None:
+            raise ValueError("image and image_embeds cannot both be None")
+        if noise_level < 0 or noise_level >= self.image_noising_scheduler.config.num_train_timesteps:
+            raise ValueError("noise_level out of range")
+
+    def _prepare_vae_image(self, image, height, width, device, dtype):
+        if torch.is_tensor(image):
+            img = image
+            if img.dim() == 3:
+                img = img.unsqueeze(0)
+            if img.max() > 1.0:
+                img = img / 255.0
+            return img.to(device=device, dtype=dtype)
+
+        if isinstance(image, Image.Image):
+            images = [image]
+        elif isinstance(image, list):
+            images = image
+        else:
+            raise ValueError("Unsupported image type for VAE encoding")
+
+        arr = []
+        for im in images:
+            im = im.convert("RGB").resize((width, height), Image.BICUBIC)
+            arr.append(np.array(im))
+        arr = np.stack(arr, axis=0)
+        img = torch.from_numpy(arr).float() / 255.0
+        img = img.permute(0, 3, 1, 2)
+        return img.to(device=device, dtype=dtype)
+
+    @torch.no_grad()
+    def __call__(
+        self,
+        image: Union[torch.Tensor, Image.Image] = None,
+        prompt: Union[str, List[str]] = None,
+        height: Optional[int] = None,
+        width: Optional[int] = None,
+        num_inference_steps: int = 20,
+        guidance_scale: float = 10,
+        negative_prompt: Optional[Union[str, List[str]]] = None,
+        num_images_per_prompt: Optional[int] = 1,
+        eta: float = 0.0,
+        generator: Optional[torch.Generator] = None,
+        latents: Optional[torch.Tensor] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        negative_prompt_embeds: Optional[torch.Tensor] = None,
+        output_type: Optional[str] = "pil",
+        return_dict: bool = True,
+        callback: Optional[Callable[[int, int, torch.Tensor], None]] = None,
+        callback_steps: int = 1,
+        cross_attention_kwargs: Optional[Dict[str, Any]] = None,
+        noise_level: int = 0,
+        image_embeds: Optional[torch.Tensor] = None,
+        clip_skip: Optional[int] = None,
+    ):
+        height = height or self.unet.config.sample_size * self.vae_scale_factor
+        width = width or self.unet.config.sample_size * self.vae_scale_factor
+
+        if prompt is None and prompt_embeds is None:
+            prompt = len(image) * [""] if isinstance(image, list) else ""
+
+        self.check_inputs(prompt, image, height, width, callback_steps, noise_level,
+                          negative_prompt, prompt_embeds, negative_prompt_embeds, image_embeds)
+
+        if isinstance(prompt, str):
+            batch_size = 1
+        elif isinstance(prompt, list):
+            batch_size = len(prompt)
+        else:
+            batch_size = prompt_embeds.shape[0]
+
+        batch_size = batch_size * num_images_per_prompt
+        device = self._execution_device
+        do_classifier_free_guidance = guidance_scale > 1.0
+
+        text_encoder_lora_scale = cross_attention_kwargs.get("scale", None) if cross_attention_kwargs else None
+        prompt_embeds, negative_prompt_embeds, prompt_attention_mask, negative_prompt_attention_mask = self.encode_prompt(
+            prompt, device, num_images_per_prompt, do_classifier_free_guidance,
+            negative_prompt, prompt_embeds, negative_prompt_embeds,
+            lora_scale=text_encoder_lora_scale, clip_skip=clip_skip
+        )
+        if do_classifier_free_guidance:
+            prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
+            if prompt_attention_mask is not None and negative_prompt_attention_mask is not None:
+                prompt_attention_mask = torch.cat([negative_prompt_attention_mask, prompt_attention_mask])
+
+        noise_level = torch.tensor([noise_level], device=device)
+        image_embeds = self._encode_image(
+            image, device, batch_size, num_images_per_prompt,
+            do_classifier_free_guidance, noise_level, generator, image_embeds
+        )
+
+        self.scheduler.set_timesteps(num_inference_steps, device=device)
+        timesteps = self.scheduler.timesteps
+
+        num_channels_latents = self.unet.config.in_channels
+        if latents is None:
+            latents = self.prepare_latents(
+                batch_size, num_channels_latents, height, width,
+                prompt_embeds.dtype, device, generator, latents
+            )
+
+        extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
+
+        for i, t in enumerate(self.progress_bar(timesteps)):
+            latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
+            latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+
+            noise_pred = self.unet(
+                latent_model_input, t,
+                encoder_hidden_states=prompt_embeds,
+                class_labels=image_embeds,
+                cross_attention_kwargs=cross_attention_kwargs,
+                encoder_attention_mask=prompt_attention_mask,
+                return_dict=False,
+            )[0]
+
+            if do_classifier_free_guidance:
+                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+            latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs)[0]
+
+            if callback is not None and i % callback_steps == 0:
+                step_idx = i // getattr(self.scheduler, "order", 1)
+                callback(step_idx, t, latents)
+
+        if output_type != "latent":
+            image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
+        else:
+            image = latents
+
+        image = self.image_processor.postprocess(image, output_type=output_type)
+        self.maybe_free_model_hooks()
+
+        if not return_dict:
+            return (image,)
+        return ImagePipelineOutput(images=image)
+
+# -----------------------------
+# Demo
+# -----------------------------
+if __name__ == "__main__":
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    pipe = StableUnCLIPImg2ImgPipeline(
+        feature_extractor=CLIPImageProcessor(FEATURE_EXTRACTOR_CONFIG),
+        image_encoder=CLIPVisionModelWithProjection(IMAGE_ENCODER_CONFIG),
+        image_normalizer=StableUnCLIPImageNormalizer(IMAGE_NORMALIZER_CONFIG["embedding_dim"]),
+        image_noising_scheduler=DDPMScheduler(IMAGE_NOISING_SCHEDULER_CONFIG),
+        tokenizer=CLIPTokenizer(TOKENIZER_CONFIG, SPECIAL_TOKENS_MAP, TEXT_ENCODER_CONFIG["vocab_size"]),
+        text_encoder=CLIPTextModel(TEXT_ENCODER_CONFIG),
+        unet=UNet2DConditionModel(UNET_CONFIG),
+        scheduler=PNDMScheduler(SCHEDULER_CONFIG),
+        vae=AutoencoderKL(VAE_CONFIG),
+    ).to(device)
+
+    image = torch.rand(1, 3, 64, 64, device=device)
+    prompt = "a snowy mountain landscape"
+
+    out = pipe(
+        image=image,
+        prompt=prompt,
+        height=64,
+        width=64,
+        num_inference_steps=12,
+        guidance_scale=7.5,
+        noise_level=10,
+    )
+    out.images[0].save("toy_unclip_img2img.png")
+    print("OK: saved toy_unclip_img2img.png")
