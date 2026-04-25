@@ -19,7 +19,7 @@ code/
     └── SDUnCLIP/
 ```
 
-## cipher-inference
+## Setup
 
 Each subdirectory under `cipher-inference` is an independent secure-inference project that can be built and run separately. Build from each project root:
 
@@ -36,9 +36,8 @@ Run DDPM as follows. Run DEALER first to generate offline preprocessing material
 
 Run SDUnCLIP similarly. Run DEALER first, then SERVER and CLIENT.
 
-### plain-inference
 
-## plain-inference/DDPM
+### plain-inference/DDPM
 
 `plain-inference/DDPM/` includes training, plaintext inference, approximation inference, ablation scripts, and metric scripts for DDPM.
 
@@ -49,7 +48,7 @@ Run SDUnCLIP similarly. Run DEALER first, then SERVER and CLIENT.
 - `plain_ablation_jax.py`: ablation script.
 - Other scripts: metric evaluation such as KID and SSIM.
 
-## plain-inference/SDUnCLIP
+### plain-inference/SDUnCLIP
 
 `plain-inference/SDUnCLIP/` includes plaintext generation, approximation inference, and evaluation scripts for SDUnCLIP.
 
