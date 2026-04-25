@@ -28,11 +28,11 @@ cmake -DCMAKE_BUILD_TYPE=Release -S . -B build/
 cmake --build build/ --config Release --target all -j
 ```
 
-### DDPM
+### cipher-inference/DDPM
 
 Run DDPM as follows. Run DEALER first to generate offline preprocessing materials, then run SERVER and CLIENT separately.
 
-### SDUnCLIP
+### cipher-inference/SDUnCLIP
 
 Run SDUnCLIP similarly. Run DEALER first, then SERVER and CLIENT.
 
