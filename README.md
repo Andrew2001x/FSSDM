@@ -80,3 +80,8 @@ taskset -c 16-31 env SHARK_KEYBUF_IO_MB=512 OMP_NUM_THREADS=16 OMP_DYNAMIC=FALSE
 - `eval_coco_unclip_fast_det.py`: COCO evaluation script.
 - `eval_flickr30k_unclip_fast_det.py`: Flickr30k evaluation script.
 - `mse.py`: MSE metric script.
+
+### Data&Model
+The data and model are available at: https://drive.google.com/drive/folders/1xVpa_S-R7g7J1i9poQfyzOsrKMGx3Wdi?usp=sharing
+
+
