@@ -36,6 +36,8 @@ Run DDPM as follows. Run DEALER first to generate offline preprocessing material
 
 Run SDUnCLIP similarly. Run DEALER first, then SERVER and CLIENT.
 
+### plain-inference
+
 ## plain-inference/DDPM
 
 `plain-inference/DDPM/` includes training, plaintext inference, approximation inference, ablation scripts, and metric scripts for DDPM.
