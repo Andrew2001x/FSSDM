@@ -32,9 +32,26 @@ cmake --build build/ --config Release --target all -j
 
 Run DDPM as follows. Run DEALER first to generate offline preprocessing materials, then run SERVER and CLIENT separately.
 
+```bash
+  taskset -c 0-31 env SHARK_KEYBUF_IO_MB=512 OMP_NUM_THREADS=32 OMP_DYNAMIC=FALSE OMP_PROC_BIND=spread OMP_PLACES=cores GOMP_SPINCOUNT=0 OMP_WAIT_POLICY=PASSIVE GOMP_CPU_AFFINITY="0-31" ./build/benchmark-ddpm 2 --seed 20260304 --steps 5 --config  benchmarks/ddpm_bench_config.json
+
+  taskset -c 0-15 env SHARK_KEYBUF_IO_MB=512 OMP_NUM_THREADS=16 OMP_DYNAMIC=FALSE OMP_PROC_BIND=close OMP_PLACES=cores GOMP_SPINCOUNT=0 OMP_WAIT_POLICY=PASSIVE GOMP_CPU_AFFINITY="0-15" ./build/benchmark-ddpm 0 127.0.0.1 42069 --seed 20260304 --steps 5  --config benchmarks/ddpm_bench_config.json > logs/server_online4.log 2>&1
+
+  taskset -c 16-31 env SHARK_KEYBUF_IO_MB=512 OMP_NUM_THREADS=16 OMP_DYNAMIC=FALSE OMP_PROC_BIND=close OMP_PLACES=cores GOMP_SPINCOUNT=0 OMP_WAIT_POLICY=PASSIVE GOMP_CPU_AFFINITY="16-31" ./build/benchmark-ddpm 1 127.0.0.1 42069 --seed 20260304 --steps 5 --config benchmarks/ddpm_bench_config.json > logs/client_online4.log 2>&1
+```
+
+
 ### cipher-inference/SDUnCLIP
 
 Run SDUnCLIP similarly. Run DEALER first, then SERVER and CLIENT.
+
+```bash
+taskset -c 0-31 env SHARK_KEYBUF_IO_MB=512 OMP_NUM_THREADS=32 OMP_DYNAMIC=FALSE OMP_PROC_BIND=spread OMP_PLACES=cores OMP_WAIT_POLICY=PASSIVE GOMP_CPU_AFFINITY="0-31" UNCLIP_SEED=20260304 UNCLIP_ESTIMATE_REPEAT=1 ./build/benchmark-unclip_img2imgsmall 2 > logs/dealer_offline.log 2>&1
+
+taskset -c 0-15 env SHARK_KEYBUF_IO_MB=512 OMP_NUM_THREADS=16 OMP_DYNAMIC=FALSE OMP_PROC_BIND=close OMP_PLACES=cores GOMP_SPINCOUNT=0 OMP_WAIT_POLICY=PASSIVE GOMP_CPU_AFFINITY="0-15" UNCLIP_SEED=20260304 UNCLIP_ESTIMATE_REPEAT=1 ./build/benchmark-unclip_img2imgsmall 0 127.0.0.1 42069 > logs/server_online1.log 2>&1
+
+taskset -c 16-31 env SHARK_KEYBUF_IO_MB=512 OMP_NUM_THREADS=16 OMP_DYNAMIC=FALSE OMP_PROC_BIND=close OMP_PLACES=cores GOMP_SPINCOUNT=0 OMP_WAIT_POLICY=PASSIVE GOMP_CPU_AFFINITY="16-31" UNCLIP_SEED=20260304 UNCLIP_ESTIMATE_REPEAT=1 ./build/benchmark-unclip_img2imgsmall 1 127.0.0.1 42069 > logs/client_online1.log 2>&1
+```
 
 
 ### plain-inference/DDPM
