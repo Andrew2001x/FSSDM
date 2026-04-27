@@ -85,3 +85,10 @@ taskset -c 16-31 env SHARK_KEYBUF_IO_MB=512 OMP_NUM_THREADS=16 OMP_DYNAMIC=FALSE
 The data and model are available at: https://drive.google.com/drive/folders/1xVpa_S-R7g7J1i9poQfyzOsrKMGx3Wdi?usp=sharing
 
 
+### Used Open Source Projects 
+This repository is built upon the following open-source projects:
+https://github.com/kanav99/shark
+https://github.com/Zhaoxinxinzi/CipherDM
+https://github.com/huggingface/transformers
+https://github.com/huggingface/transformers
+
