@@ -2,7 +2,7 @@
 
 This directory contains the secure-inference code and plaintext inference/evaluation code used in the paper's supplementary material. It is split into two parts:
 
-- `cipher-inference/`: secure-inference experiment code based on SHARK/C++.
+- `cipher-inference/`: secure-inference experiment code based on C++.
 - `plain-inference/`: plaintext inference, approximation baselines, ablation scripts, and metric scripts.
 
 ## Directory Structure
