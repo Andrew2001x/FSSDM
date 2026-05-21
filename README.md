@@ -92,6 +92,5 @@ This repository is built upon the following open-source projects:
 https://github.com/kanav99/shark
 https://github.com/Zhaoxinxinzi/CipherDM
 https://github.com/huggingface/transformers
-https://github.com/huggingface/transformers
 ```
 
