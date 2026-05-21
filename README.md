@@ -69,8 +69,8 @@ taskset -c 16-31 env SHARK_KEYBUF_IO_MB=512 OMP_NUM_THREADS=16 OMP_DYNAMIC=FALSE
 
 `plain-inference/SDUnCLIP/` includes plaintext generation, approximation inference, and evaluation scripts for SDUnCLIP.
 
-- `modify1/`: CipherDM approximation variant used in conda-based modification/runs.
-- `modify2/`: FSSDM approximation variant used in conda-based modification/runs.
+- `modify1/`: CipherDM approximation variant used in conda-based modification.
+- `modify2/`: FSSDM approximation variant used in conda-based modification.
 - `modify_1000.sh`: script for generation, inference, and evaluation pipeline.
 - `run_all_unclip_once_fp32_no_xformers_no_safety_1000_det.py`: unified runner.
 - `generate_cc3m_unclip_fast_fp32_no_xformers_no_safety_debug.py`: CC3M generation script.
